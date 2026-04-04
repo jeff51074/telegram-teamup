@@ -320,36 +320,13 @@ async function askClaudeWithSearch(question) {
     console.log('🔍 Asking Claude:', question);
 
     const response = await client.messages.create({
-      model: 'claude-opus-4-1-20250805',
+      model: 'claude-opus-4-6',
       max_tokens: 2000,
-      system: `你是一個有用的助手。用戶會問你任何問題，你應該盡量詳細和準確地回答。
-如果需要最新信息，你可以使用網絡搜索。用中文回答。`,
+      system: `你是一個有用的助手。用戶會問你任何問題，你應該盡量詳細和準確地回答。用中文回答。`,
       messages: [
         {
           role: 'user',
-          content: [
-            {
-              type: 'text',
-              text: question
-            }
-          ]
-        }
-      ],
-      tools: [
-        {
-          type: 'computer_use',
-          name: 'web_search',
-          description: 'Search the web for information',
-          input_schema: {
-            type: 'object',
-            properties: {
-              query: {
-                type: 'string',
-                description: 'The search query'
-              }
-            },
-            required: ['query']
-          }
+          content: question
         }
       ]
     });
