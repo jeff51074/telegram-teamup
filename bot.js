@@ -844,7 +844,9 @@ async function handle(text) {
 // ── Webhook Server (替代 Polling) ──────────────────────
 const app = express();
 const PORT = process.env.PORT || 3000;
-const WEBHOOK_URL = process.env.WEBHOOK_URL || `https://telegram-teamup.up.railway.app/webhook`;
+// Railway 會自動設置 RAILWAY_ENVIRONMENT_URL
+const RAILWAY_URL = process.env.RAILWAY_PUBLIC_DOMAIN || process.env.RAILWAY_ENVIRONMENT_URL;
+const WEBHOOK_URL = process.env.WEBHOOK_URL || (RAILWAY_URL ? `https://${RAILWAY_URL}/webhook` : 'https://telegram-teamup.up.railway.app/webhook');
 
 app.use(express.json());
 
