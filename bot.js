@@ -328,7 +328,7 @@ async function askClaudeWithSearch(question) {
     const response = await client.messages.create({
       model: 'claude-opus-4-6',
       max_tokens: 2000,
-      system: `你是一個有用的助手。用戶會問你任何問題，你應該盡量詳細和準確地回答。用中文回答。`,
+      system: buildSystemPrompt(),  // ✅ 使用正確的系統提示（包含日期信息）
       messages: [
         {
           role: 'user',
