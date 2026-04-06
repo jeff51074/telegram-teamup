@@ -482,10 +482,19 @@ async function executeAction(actionJson) {
   try {
     // Try to extract JSON from response (handle possible markdown wrapping)
     const jsonMatch = actionJson.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('No JSON found');
-    parsed = JSON.parse(jsonMatch[0]);
+    if (!jsonMatch) {
+      console.error('❌ 無法從回覆中提取 JSON');
+      console.error('回覆內容:', actionJson.substring(0, 200));
+      throw new Error('No JSON found');
+    }
+
+    const jsonStr = jsonMatch[0];
+    console.log('✅ 提取的 JSON:', jsonStr.substring(0, 100));
+    parsed = JSON.parse(jsonStr);
+    console.log('✅ JSON 解析成功，action:', parsed.action);
   } catch (e) {
     // If Claude didn't return valid JSON, treat it as a direct reply
+    console.error('❌ JSON 解析失敗:', e.message);
     await send(actionJson.substring(0, 4000) || '❌ 无法理解，请再说一次');
     return;
   }
