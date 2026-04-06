@@ -5,6 +5,7 @@ const path = require('path');
 const { execFile } = require('child_process');
 const { chromium } = require('playwright');
 const Anthropic = require('@anthropic-ai/sdk');
+const express = require('express');
 const CLAUDE = '/Users/mannyaoleong/.local/bin/claude';
 const WORK_DIR = '/Users/mannyaoleong/Downloads/VS CODE/my PROJECT';
 const BOT_DIR = '/Users/mannyaoleong/Downloads/VS CODE/my PROJECT/telegram-teamup';
@@ -840,46 +841,68 @@ async function handle(text) {
   await executeAction(answer);
 }
 
-// ── Polling Loop ─────────────────────────────────────────
-let pollErrorCount = 0;
-let isPolling = false; // ✅ 防止多個 poll 實例
+// ── Webhook Server (替代 Polling) ──────────────────────
+const app = express();
+const PORT = process.env.PORT || 3000;
+const WEBHOOK_URL = process.env.WEBHOOK_URL || `https://telegram-teamup.up.railway.app/webhook`;
 
-async function poll() {
-  // 防止多個 poll 實例同時運行
-  if (isPolling) {
-    console.warn('⚠️ poll 已在運行，跳過本次調用');
-    return;
-  }
-  isPolling = true;
+app.use(express.json());
 
+// ✅ Webhook 端點：接收 Telegram 推送的訊息
+app.post('/webhook', async (req, res) => {
   try {
-    const res = await tg.get('/getUpdates', { params: { offset, timeout: 30 }, timeout: 35000 });
-    pollErrorCount = 0; // 重置錯誤計數
+    const update = req.body;
 
-    for (const update of res.data.result) {
-      offset = update.update_id + 1;
-      const text = update.message?.text;
-      if (text && String(update.message.chat.id) === CHAT_ID) {
-        // 獨立處理每條訊息，即使一條出錯也不影響其他訊息
-        handle(text).catch(err => {
-          console.error('❌ 訊息處理錯誤:', err.message);
-          send(`❌ 错误：${err.message.substring(0, 200)}`).catch(e => console.error('發送錯誤:', e.message));
-        });
-      }
+    // 只處理文字訊息
+    const message = update.message;
+    if (!message || !message.text) {
+      res.json({ ok: true });
+      return;
+    }
+
+    // 只處理特定聊天的訊息
+    if (String(message.chat.id) !== CHAT_ID) {
+      res.json({ ok: true });
+      return;
+    }
+
+    console.log('📨 接收到訊息:', message.text);
+
+    // 異步處理訊息（不阻塞 webhook 回覆）
+    handle(message.text).catch(err => {
+      console.error('❌ 訊息處理錯誤:', err.message);
+      send(`❌ 错误：${err.message.substring(0, 200)}`).catch(e => console.error('發送錯誤:', e.message));
+    });
+
+    // 立即回覆 200 OK，告訴 Telegram 已收到
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Webhook 錯誤:', e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// 健康檢查端點
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// 設置 Webhook
+async function setupWebhook() {
+  try {
+    console.log('🔧 設置 Webhook...');
+    const response = await tg.post('/setWebhook', {
+      url: WEBHOOK_URL,
+      drop_pending_updates: true
+    });
+
+    if (response.data.ok) {
+      console.log('✅ Webhook 已設置:', WEBHOOK_URL);
+    } else {
+      console.error('❌ 設置 Webhook 失敗:', response.data);
     }
   } catch (e) {
-    pollErrorCount++;
-
-    if (e.response && e.response.status === 409) {
-      // 409 Conflict: 另一個實例在 polling，長時間等待
-      console.error(`⚠️ Poll 409 Conflict (嘗試 ${pollErrorCount})，等待後重試...`);
-    } else if (pollErrorCount <= 3) {
-      console.error('⚠️ Poll 錯誤:', e.message);
-    }
-  } finally {
-    isPolling = false;
-    // 無論成功或失敗，都在固定延遲後重新 poll
-    setTimeout(poll, 2000);
+    console.error('❌ 設置 Webhook 錯誤:', e.message);
   }
 }
 
@@ -1027,10 +1050,21 @@ function scheduleReminders() {
   console.log('📊 每周总结已設定：每周日 20:00 (馬來西亞時間)');
 }
 
-console.log('🤖 Telegram Teamup Bot 已启动（自然语言模式）！');
+console.log('🤖 Telegram Teamup Bot 已启动（Webhook 模式）！');
 console.log('💬 直接用自然语言跟 bot 说话即可');
 console.log('📋 功能：日历 | 客户管道 | SOP | 收入追踪 | 内容管道 | 浏览器 | Claude Code');
-console.log('⚡ [2026-04-06] 已重新部署和測試');
-send('🤖 Bot 已上線！直接用自然語言跟我說話就行～\n⏰ 每天 9am/10am/11am 自動提醒今天行程\n🔔 每個行程開始前1小時自動通知你\n📊 每週日晚8點發送每週總結\n\n新功能：👥客戶管道 | 📋SOP | 💰收入追踪 | 🎬內容管道').catch(() => {});
-scheduleReminders();
-poll();
+console.log('⚡ Webhook 模式（無 409 衝突）');
+
+// 啟動 Express 服務器
+app.listen(PORT, async () => {
+  console.log(`✅ Webhook 服務已啟動在 http://0.0.0.0:${PORT}`);
+
+  // 設置 Webhook
+  await setupWebhook();
+
+  // 發送啟動訊息
+  send('🤖 Bot 已上線（Webhook 模式）！直接用自然語言跟我說話就行～\n⏰ 每天 9am/10am/11am 自動提醒今天行程\n🔔 每個行程開始前1小時自動通知你\n📊 每週日晚8點發送每週總結\n⚡ 已改用 Webhook（更穩定，無 409 問題）\n\n新功能：👥客戶管道 | 📋SOP | 💰收入追踪 | 🎬內容管道').catch(() => {});
+
+  // 啟動定期提醒
+  scheduleReminders();
+});
