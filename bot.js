@@ -842,7 +842,16 @@ async function handle(text) {
 
 // ── Polling Loop ─────────────────────────────────────────
 let pollErrorCount = 0;
+let isPolling = false; // ✅ 防止多個 poll 實例
+
 async function poll() {
+  // 防止多個 poll 實例同時運行
+  if (isPolling) {
+    console.warn('⚠️ poll 已在運行，跳過本次調用');
+    return;
+  }
+  isPolling = true;
+
   try {
     const res = await tg.get('/getUpdates', { params: { offset, timeout: 30 }, timeout: 35000 });
     pollErrorCount = 0; // 重置錯誤計數
@@ -862,24 +871,16 @@ async function poll() {
     pollErrorCount++;
 
     if (e.response && e.response.status === 409) {
-      // 409 Conflict: 另一個實例在 polling，等待更長時間
-      const waitTime = Math.min(10000 * pollErrorCount, 60000); // 最多等待60秒
-      console.error(`⚠️ Poll 409: 等待 ${waitTime}ms 後重試... (嘗試 ${pollErrorCount})`);
-      setTimeout(poll, waitTime);
-      return;
-    }
-
-    if (pollErrorCount <= 3) {
+      // 409 Conflict: 另一個實例在 polling，長時間等待
+      console.error(`⚠️ Poll 409 Conflict (嘗試 ${pollErrorCount})，等待後重試...`);
+    } else if (pollErrorCount <= 3) {
       console.error('⚠️ Poll 錯誤:', e.message);
     }
-
-    // 任何錯誤都不要中斷，根據錯誤次數等待
-    const backoffDelay = Math.min(1000 * Math.pow(2, pollErrorCount - 1), 30000);
-    setTimeout(poll, backoffDelay);
-    return;
+  } finally {
+    isPolling = false;
+    // 無論成功或失敗，都在固定延遲後重新 poll
+    setTimeout(poll, 2000);
   }
-
-  setTimeout(poll, 1000);
 }
 
 // ── 每日自動提醒 ─────────────────────────────────────────
