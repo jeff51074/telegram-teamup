@@ -13,51 +13,6 @@ const BOT_DIR = '/Users/mannyaoleong/Downloads/VS CODE/my PROJECT/telegram-teamu
 const CLIENTS_FILE = path.join(BOT_DIR, 'clients.json');
 const REVENUE_FILE = path.join(BOT_DIR, 'revenue.json');
 const CONTENT_FILE = path.join(BOT_DIR, 'content.json');
-const QUEUE_FILE = path.join(BOT_DIR, 'queue.json');
-
-// ── Message Queue for Offline Support ──────────────────
-let messageQueue = [];
-function loadQueue() {
-  try {
-    if (fs.existsSync(QUEUE_FILE)) {
-      messageQueue = JSON.parse(fs.readFileSync(QUEUE_FILE, 'utf-8'));
-      console.log(`📋 已載入隊列: ${messageQueue.length} 條待處理訊息`);
-    }
-  } catch (e) {
-    console.error('隊列載入失敗:', e.message);
-  }
-}
-
-function saveQueue() {
-  try {
-    fs.writeFileSync(QUEUE_FILE, JSON.stringify(messageQueue, null, 2));
-  } catch (e) {
-    console.error('隊列保存失敗:', e.message);
-  }
-}
-
-function addToQueue(text) {
-  messageQueue.push({ text, timestamp: Date.now(), retries: 0 });
-  saveQueue();
-  console.log(`⏳ 訊息已加入隊列: "${text.substring(0, 50)}..."`);
-}
-
-// ── Retry Helper ───────────────────────────────────────
-async function retryWithBackoff(fn, maxRetries = 3, delayMs = 1000) {
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      return await fn();
-    } catch (error) {
-      if (i < maxRetries - 1) {
-        const delay = delayMs * Math.pow(2, i);
-        console.log(`⚠️ 重試 ${i + 1}/${maxRetries - 1}，等待 ${delay}ms...`);
-        await new Promise(r => setTimeout(r, delay));
-      } else {
-        throw error;
-      }
-    }
-  }
-}
 
 // ── JSON file helpers ───────────────────────────────────
 function readJsonFile(filePath, defaultValue) {
@@ -861,33 +816,13 @@ async function executeAction(actionJson) {
 // ── Command Handler ──────────────────────────────────────
 async function handle(text) {
   const msg = text.trim();
+  await send('💭 思考中...');
 
-  try {
-    await send('💭 思考中...');
+  // 用 Claude API 理解用户意图並返回 JSON action
+  const answer = await askClaudeWithSearch(msg);
 
-    // 用 Claude API 理解用户意图並返回 JSON action（含重試機制）
-    const answer = await retryWithBackoff(
-      () => askClaudeWithSearch(msg),
-      3,
-      1000
-    );
-
-    // 執行 Claude 返回的 action（新增日程、查询行程等）
-    await executeAction(answer);
-  } catch (error) {
-    console.error('❌ 處理失敗:', error.message);
-
-    // 網路錯誤時加入隊列，待網路恢復後重試
-    if (error.message.includes('ECONNREFUSED') ||
-        error.message.includes('ETIMEDOUT') ||
-        error.message.includes('ENOTFOUND') ||
-        error.code === 'ECONNREFUSED') {
-      addToQueue(msg);
-      await send(`⚠️ 網路連接中斷，訊息已保存。網路恢復後會自動處理！\n\n📝 您說的是：「${msg.substring(0, 100)}${msg.length > 100 ? '...' : ''}」`);
-    } else {
-      await send(`❌ 處理失敗：${error.message.substring(0, 200)}`);
-    }
-  }
+  // 執行 Claude 返回的 action（新增日程、查询行程等）
+  await executeAction(answer);
 }
 
 // ── Polling Loop ─────────────────────────────────────────
@@ -898,16 +833,23 @@ async function poll() {
       offset = update.update_id + 1;
       const text = update.message?.text;
       if (text && String(update.message.chat.id) === CHAT_ID) {
-        await handle(text).catch(err => send('❌ 错误：' + err.message));
+        // 獨立處理每條訊息，即使一條出錯也不影響其他訊息
+        handle(text).catch(err => {
+          console.error('❌ 訊息處理錯誤:', err.message);
+          send(`❌ 错误：${err.message.substring(0, 200)}`).catch(e => console.error('發送錯誤:', e.message));
+        });
       }
     }
   } catch (e) {
     if (e.response && e.response.status === 409) {
-      console.error('Poll 409: another instance may be running. Retrying in 5s...');
+      console.error('⚠️ Poll 409: 另一個實例在運行，5秒後重試...');
       setTimeout(poll, 5000);
       return;
     }
-    console.error('Poll error:', e.message);
+    console.error('⚠️ Poll 錯誤:', e.message);
+    // 任何錯誤都不要中斷，5秒後繼續重試
+    setTimeout(poll, 5000);
+    return;
   }
   setTimeout(poll, 1000);
 }
@@ -1023,34 +965,6 @@ async function weeklySummary() {
   }
 }
 
-// ── 隊列重試機制 ───────────────────────────────────────
-async function processQueue() {
-  if (messageQueue.length === 0) return;
-
-  console.log(`⏳ 正在重試隊列中的 ${messageQueue.length} 條訊息...`);
-  const toProcess = [...messageQueue];
-  messageQueue = [];
-
-  for (const item of toProcess) {
-    try {
-      console.log(`🔄 重試訊息: "${item.text.substring(0, 50)}..."`);
-      await handle(item.text);
-      console.log(`✅ 訊息已處理`);
-    } catch (error) {
-      item.retries++;
-      if (item.retries < 5) {
-        console.log(`⚠️ 重試失敗 (${item.retries}/5)，重新加入隊列`);
-        messageQueue.push(item);
-      } else {
-        console.error(`❌ 訊息已放棄（超過5次重試）: "${item.text.substring(0, 50)}..."`);
-        await send(`❌ 對不起，無法處理您的訊息：「${item.text.substring(0, 100)}...」\n\n請稍後重試！`).catch(() => {});
-      }
-    }
-  }
-
-  saveQueue();
-}
-
 function scheduleReminders() {
   const REMINDER_HOURS = [9, 10, 11]; // 早上 9, 10, 11 點
 
@@ -1069,11 +983,6 @@ function scheduleReminders() {
     if (day === 0 && h === 20 && m === 0) {
       weeklySummary().catch(e => console.error('Weekly summary error:', e.message));
     }
-
-    // 每10分鐘重試一次隊列中的訊息
-    if (m % 10 === 0) {
-      processQueue().catch(e => console.error('Queue processing error:', e.message));
-    }
   }, 60000); // 每分鐘檢查一次
 
   // 每分鐘檢查是否有事件即將在1小時後開始
@@ -1087,22 +996,11 @@ function scheduleReminders() {
   console.log('⏰ 每日提醒已設定：9:00, 10:00, 11:00 (馬來西亞時間)');
   console.log('⏰ 事項提前1小時提醒已啟動（每分鐘檢查）');
   console.log('📊 每周总结已設定：每周日 20:00 (馬來西亞時間)');
-  console.log('⏳ 隊列重試機制已啟動（每10分鐘檢查一次）');
 }
 
 console.log('🤖 Telegram Teamup Bot 已启动（自然语言模式）！');
 console.log('💬 直接用自然语言跟 bot 说话即可');
 console.log('📋 功能：日历 | 客户管道 | SOP | 收入追踪 | 内容管道 | 浏览器 | Claude Code');
-
-// 加載待處理隊列
-loadQueue();
-
-// 立即嘗試處理隊列（如果有的話）
-if (messageQueue.length > 0) {
-  console.log(`⏳ 發現 ${messageQueue.length} 條待處理訊息，將在60秒後開始重試...`);
-  setTimeout(() => processQueue().catch(e => console.error('Queue error:', e.message)), 60000);
-}
-
-send('🤖 Bot 已上線！直接用自然語言跟我說話就行～\n⏰ 每天 9am/10am/11am 自動提醒今天行程\n🔔 每個行程開始前1小時自動通知你\n📊 每週日晚8點發送每週總結\n⚡ 網路不穩定時會自動保存並重試！\n\n新功能：👥客戶管道 | 📋SOP | 💰收入追踪 | 🎬內容管道').catch(() => {});
+send('🤖 Bot 已上線！直接用自然語言跟我說話就行～\n⏰ 每天 9am/10am/11am 自動提醒今天行程\n🔔 每個行程開始前1小時自動通知你\n📊 每週日晚8點發送每週總結\n\n新功能：👥客戶管道 | 📋SOP | 💰收入追踪 | 🎬內容管道').catch(() => {});
 scheduleReminders();
 poll();
