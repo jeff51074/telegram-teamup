@@ -1007,6 +1007,7 @@ function scheduleReminders() {
 console.log('🤖 Telegram Teamup Bot 已启动（自然语言模式）！');
 console.log('💬 直接用自然语言跟 bot 说话即可');
 console.log('📋 功能：日历 | 客户管道 | SOP | 收入追踪 | 内容管道 | 浏览器 | Claude Code');
+console.log('⚡ [2026-04-06] 已重新部署和測試');
 send('🤖 Bot 已上線！直接用自然語言跟我說話就行～\n⏰ 每天 9am/10am/11am 自動提醒今天行程\n🔔 每個行程開始前1小時自動通知你\n📊 每週日晚8點發送每週總結\n\n新功能：👥客戶管道 | 📋SOP | 💰收入追踪 | 🎬內容管道').catch(() => {});
 scheduleReminders();
 poll();
