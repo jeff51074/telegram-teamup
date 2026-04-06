@@ -191,7 +191,13 @@ let offset = 0;
 const remindedEvents = new Set(); // 記錄已提醒過的事件，避免重複提醒
 
 // ── Helpers ──────────────────────────────────────────────
-function toDateStr(d) { return d.toISOString().split('T')[0]; }
+function toDateStr(d) {
+  // 使用馬來西亞時區（Asia/Kuala_Lumpur）而不是 UTC
+  const year = d.toLocaleString('en-US', { timeZone: 'Asia/Kuala_Lumpur', year: 'numeric' });
+  const month = d.toLocaleString('en-US', { timeZone: 'Asia/Kuala_Lumpur', month: '2-digit' });
+  const day = d.toLocaleString('en-US', { timeZone: 'Asia/Kuala_Lumpur', day: '2-digit' });
+  return `${year}-${month}-${day}`;
+}
 
 function formatEvent(e) {
   const startDate = new Date(e.start_dt);
