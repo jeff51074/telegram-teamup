@@ -832,9 +832,12 @@ async function handle(text) {
 }
 
 // ── Polling Loop ─────────────────────────────────────────
+let pollErrorCount = 0;
 async function poll() {
   try {
     const res = await tg.get('/getUpdates', { params: { offset, timeout: 30 }, timeout: 35000 });
+    pollErrorCount = 0; // 重置錯誤計數
+
     for (const update of res.data.result) {
       offset = update.update_id + 1;
       const text = update.message?.text;
@@ -847,16 +850,26 @@ async function poll() {
       }
     }
   } catch (e) {
+    pollErrorCount++;
+
     if (e.response && e.response.status === 409) {
-      console.error('⚠️ Poll 409: 另一個實例在運行，5秒後重試...');
-      setTimeout(poll, 5000);
+      // 409 Conflict: 另一個實例在 polling，等待更長時間
+      const waitTime = Math.min(10000 * pollErrorCount, 60000); // 最多等待60秒
+      console.error(`⚠️ Poll 409: 等待 ${waitTime}ms 後重試... (嘗試 ${pollErrorCount})`);
+      setTimeout(poll, waitTime);
       return;
     }
-    console.error('⚠️ Poll 錯誤:', e.message);
-    // 任何錯誤都不要中斷，5秒後繼續重試
-    setTimeout(poll, 5000);
+
+    if (pollErrorCount <= 3) {
+      console.error('⚠️ Poll 錯誤:', e.message);
+    }
+
+    // 任何錯誤都不要中斷，根據錯誤次數等待
+    const backoffDelay = Math.min(1000 * Math.pow(2, pollErrorCount - 1), 30000);
+    setTimeout(poll, backoffDelay);
     return;
   }
+
   setTimeout(poll, 1000);
 }
 
