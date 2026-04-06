@@ -818,20 +818,11 @@ async function handle(text) {
   const msg = text.trim();
   await send('💭 思考中...');
 
-  // 直接用 Claude API 回答任何問題（帶網絡搜索）
+  // 用 Claude API 理解用户意图並返回 JSON action
   const answer = await askClaudeWithSearch(msg);
 
-  // 分段發送（Telegram 限制 4096 字）
-  const MAX_LEN = 3900;
-  if (answer.length <= MAX_LEN) {
-    await send(answer);
-  } else {
-    const parts = Math.ceil(answer.length / MAX_LEN);
-    for (let i = 0; i < parts; i++) {
-      const chunk = answer.substring(i * MAX_LEN, (i + 1) * MAX_LEN);
-      await send(`📄 (${i + 1}/${parts})\n\n${chunk}`);
-    }
-  }
+  // 執行 Claude 返回的 action（新增日程、查询行程等）
+  await executeAction(answer);
 }
 
 // ── Polling Loop ─────────────────────────────────────────
