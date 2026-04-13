@@ -6,9 +6,19 @@ const { execFile } = require('child_process');
 const { chromium } = require('playwright');
 const Anthropic = require('@anthropic-ai/sdk');
 const express = require('express');
+const {
+  addBossMessage, getBossMessages, clearBossMessages,
+  addTask, markTaskDone, findPendingTaskByKeyword,
+  getTasksByDate, getPendingTasks, getOverdueTasks,
+  incrementRemindCount, formatTaskList, formatPendingReport
+} = require('./tools/tasks');
+
 const CLAUDE = '/Users/mannyaoleong/.local/bin/claude';
 const WORK_DIR = '/Users/mannyaoleong/Downloads/VS CODE/my PROJECT';
 const BOT_DIR = '/Users/mannyaoleong/Downloads/VS CODE/my PROJECT/telegram-teamup';
+
+// ── Boss User ID（只有 Boss 的訊息會被收集為任務）────────
+const BOSS_USER_ID = process.env.BOSS_USER_ID || '1168091068'; // 你的 Telegram user ID
 
 // ── Data file paths ─────────────────────────────────────
 const CLIENTS_FILE = path.join(BOT_DIR, 'clients.json');
@@ -182,8 +192,15 @@ const TEAMUP_CALENDAR = process.env.TEAMUP_CALENDAR;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const TEAMUP_API = `https://api.teamup.com/${TEAMUP_CALENDAR}`;
 
+// ── Operating Team 日曆（任務系統用）────────────────────
+const OT_CALENDAR = process.env.OPERATING_TEAM_CALENDAR || 'kssh1zqukx5nk2htat';
+const OT_TOKEN = process.env.OPERATING_TEAM_TOKEN || 'd64b9cef76aa72e2bec419fc40e55bc7b1537833b1191b205bc029a6061a8c91';
+const OT_SUBCAL = parseInt(process.env.OPERATING_TEAM_SUBCAL || '15503793');
+const OT_API = `https://api.teamup.com/${OT_CALENDAR}`;
+
 const tg = axios.create({ baseURL: `https://api.telegram.org/bot${TELEGRAM_TOKEN}` });
 const teamup = axios.create({ baseURL: TEAMUP_API, headers: { 'Teamup-Token': TEAMUP_TOKEN } });
+const otTeamup = axios.create({ baseURL: OT_API, headers: { 'Teamup-Token': OT_TOKEN } });
 
 // Initialize Anthropic client with web search
 const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
@@ -317,8 +334,151 @@ function formatRevenueReport(entries, periodLabel) {
 }
 
 // ── Send message ─────────────────────────────────────────
-async function send(text) {
-  await tg.post('/sendMessage', { chat_id: CHAT_ID, text, parse_mode: 'HTML' });
+async function send(text, chatId) {
+  await tg.post('/sendMessage', { chat_id: chatId || CHAT_ID, text, parse_mode: 'HTML' });
+}
+
+// 發送帶 inline 按鈕的訊息
+async function sendWithButtons(text, buttons, chatId) {
+  await tg.post('/sendMessage', {
+    chat_id: chatId || CHAT_ID,
+    text,
+    parse_mode: 'HTML',
+    reply_markup: JSON.stringify({ inline_keyboard: buttons })
+  });
+}
+
+// ── AI 任務整理：把 Boss 訊息整理成結構化任務 ─────────────
+async function summarizeBossMessages(chatId) {
+  const msgs = getBossMessages();
+  if (!msgs.length) {
+    await send('📭 目前沒有收集到新的任務訊息', chatId);
+    return;
+  }
+
+  const now = new Date();
+  const todayStr = toDateStr(now);
+
+  // 把所有 boss 訊息組合成一段文字給 Claude 分析
+  const msgText = msgs.map(m => {
+    const t = new Date(m.time).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kuala_Lumpur' });
+    return `[${t}] ${m.from}: ${m.text}`;
+  }).join('\n');
+
+  const prompt = `你是一個任務整理助手。以下是團隊今天在群裡的所有訊息（包含誰說的）：
+
+${msgText}
+
+請從這些訊息中提取所有任務/工作指令，忽略閒聊和非任務相關的內容。
+
+你必須只返回一個 JSON 數組（不要包含任何其他文字），格式如下：
+[
+  {
+    "title": "任務標題（簡潔明確）",
+    "assignee": "負責人（如果老闆有指定的話，沒指定就留空）",
+    "deadline": "截止時間（如果有提到的話，格式 HH:mm 或 YYYY-MM-DD，沒提到就留空）",
+    "has_time": true/false（是否有明確的時間點，如果有就加入日曆）
+  }
+]
+
+今天日期：${todayStr}
+如果沒有任何任務，返回空數組 []`;
+
+  try {
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 2000,
+      messages: [{ role: 'user', content: prompt }]
+    });
+
+    let answer = '';
+    for (const block of response.content) {
+      if (block.type === 'text') answer += block.text;
+    }
+
+    // 解析 JSON
+    const jsonMatch = answer.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      await send('❌ 無法解析任務，請稍後再試', chatId);
+      return;
+    }
+
+    const taskItems = JSON.parse(jsonMatch[0]);
+    if (!taskItems.length) {
+      await send('🤔 從訊息中沒有找到明確的任務指令', chatId);
+      return;
+    }
+
+    // 建立任務 + 日曆事件
+    const createdTasks = [];
+    for (const item of taskItems) {
+      // 如果有明確時間，也加到 TeamUp 日曆
+      let calendarEventId = null;
+      if (item.has_time && item.deadline) {
+        try {
+          let startDt, endDt;
+          if (item.deadline.includes(':') && !item.deadline.includes('-')) {
+            // 只有時間 HH:mm → 今天的那個時間
+            startDt = `${todayStr}T${item.deadline}:00`;
+            const [h, m] = item.deadline.split(':').map(Number);
+            const endH = h + 1;
+            endDt = `${todayStr}T${String(endH).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`;
+          } else {
+            startDt = `${item.deadline}T09:00:00`;
+            endDt = `${item.deadline}T10:00:00`;
+          }
+          const res = await otTeamup.post('/events', {
+            subcalendar_id: OT_SUBCAL,
+            title: `📌 ${item.title}${item.assignee ? ' → ' + item.assignee : ''}`,
+            start_dt: startDt,
+            end_dt: endDt,
+            all_day: false
+          });
+          calendarEventId = res.data?.event?.id || null;
+        } catch (e) {
+          console.error('Calendar create error:', e.message);
+        }
+      }
+
+      const task = addTask({
+        title: item.title,
+        assignee: item.assignee || '',
+        deadline: item.deadline || '',
+        calendarEventId,
+        date: todayStr
+      });
+      createdTasks.push(task);
+    }
+
+    // 發送任務清單 + inline 按鈕
+    let text = `📋 <b>今日任務整理</b>（從 ${msgs.length} 條訊息中提取）\n\n`;
+    const buttons = [];
+    for (let i = 0; i < createdTasks.length; i++) {
+      const t = createdTasks[i];
+      const assignee = t.assignee ? ` → <b>${t.assignee}</b>` : '';
+      const deadline = t.deadline ? ` ⏰ ${t.deadline}` : '';
+      const calendar = t.calendarEventId ? ' 📅' : '';
+      text += `⬜ ${i + 1}. ${t.title}${assignee}${deadline}${calendar}\n`;
+
+      // 每個任務一行按鈕
+      buttons.push([{
+        text: `✅ 完成: ${t.title.substring(0, 30)}`,
+        callback_data: `task_done_${t.id}`
+      }]);
+    }
+
+    text += `\n👆 完成後點按鈕回報`;
+
+    await sendWithButtons(text, buttons, chatId);
+
+    // 清空 boss 訊息緩存
+    clearBossMessages();
+
+    console.log(`✅ 已整理 ${createdTasks.length} 個任務`);
+  } catch (e) {
+    console.error('Task summary error:', e.message);
+    await send(`❌ 任務整理失敗：${e.message}`, chatId);
+  }
 }
 
 // ── Ask Claude with Web Search ──────────────────────────
@@ -468,13 +628,43 @@ steps 里每个对象的 do 值：
 - 支持的位置：韓國/漢城/首爾、釜山、大邱（默认首爾）
 - 用户说 "查韓國天氣" / "今天首爾天氣如何" / "釜山天氣" → location="韓國" 或 "釜山"
 
+19. 整理任務（Boss 说 "整理任务" / "总结今天" / "任务清单" / "summary"）：
+{"action":"summarize_tasks","reply":"正在整理任務..."}
+
+20. 查看待办任務：
+{"action":"list_pending_tasks","reply":"待办任务"}
+- 用户说 "待办" / "还有什么没做" / "任务进度" → 列出未完成的任务
+
+21. ⭐ 即時任務偵測（非常重要！）：
+当消息包含任务/工作指令时，自动创建任务：
+{"action":"auto_tasks","tasks":[{"title":"任務標題","assignee":"負責人","deadline":"HH:mm或YYYY-MM-DD","has_time":true}],"reply":"回复确认"}
+
+判断规则：
+- "記得去問信用卡" → tasks:[{title:"問信用卡"}]
+- "拆解影片" → tasks:[{title:"拆解影片"}]
+- "Joey 幫我剪那個 reel" → tasks:[{title:"剪 reel",assignee:"Joey"}]
+- "明天之前把報價單發出去" → tasks:[{title:"發報價單",deadline:"明天的日期"}]
+- 如果没说日期/时间 → 默认今天，has_time=false
+- 如果没说负责人 → assignee 留空
+- 閒聊、問問題、查行程 等非任務內容 → 不要用此 action
+- 一条消息可能包含多个任务
+
+22. 員工完成回報：
+当有人说完成了某件事时，匹配任务并标记完成：
+{"action":"complete_task","keyword":"匹配关键词","reply":"确认完成的回复"}
+- "信用卡問好了" → keyword="信用卡"
+- "影片剪好了" → keyword="影片"
+- "做好了"/"完成了"/"搞定"/"OK了" + 关键词
+- 如果无法确定是哪个任务 → 用 reply action 问清楚
+
 规则：
 - "下周三" 请根据今天日期计算出具体日期
 - "后天" "大后天" 也请计算出具体日期
 - 用户说中文时用中文回复，英文时用英文
 - reply 字段支持 HTML 格式（<b>粗体</b>等）
 - 如果用户的请求模糊，用 reply action 问清楚
-- 你可以处理任何对话，不限于日历功能`;
+- 你可以处理任何对话，不限于日历功能
+- ⭐ 任务检测优先：每条消息都要先判断是否包含任务指令，如果有就用 auto_tasks`;
 }
 
 // ── Execute action from Claude's response ────────────────
@@ -821,6 +1011,114 @@ async function executeAction(actionJson) {
       await send(`❌ 天气查询失败：${e.message}`);
     }
   }
+  // ── Task Management ────────────────────────────────────
+  else if (action === 'summarize_tasks') {
+    await summarizeBossMessages();
+  }
+  else if (action === 'list_pending_tasks') {
+    const report = formatPendingReport();
+    if (!report) {
+      await send('✅ 所有任務都已完成！沒有待辦事項');
+    } else {
+      const buttons = report.pending.map(t => [{
+        text: `✅ 完成: ${t.title.substring(0, 30)}`,
+        callback_data: `task_done_${t.id}`
+      }]);
+      await sendWithButtons(report.text, buttons);
+    }
+  }
+  // ── 即時任務建立 ──────────────────────────────────────
+  else if (action === 'auto_tasks') {
+    const taskItems = parsed.tasks || [];
+    if (!taskItems.length) {
+      await send(parsed.reply || '🤔');
+      return;
+    }
+
+    const todayStr = toDateStr(new Date());
+    const createdTasks = [];
+
+    for (const item of taskItems) {
+      // 加到 Operating Team 日曆（如果有時間）
+      let calendarEventId = null;
+      if (item.has_time && item.deadline) {
+        try {
+          let startDt, endDt;
+          if (item.deadline.includes(':') && !item.deadline.includes('-')) {
+            startDt = `${todayStr}T${item.deadline}:00`;
+            const [h, m] = item.deadline.split(':').map(Number);
+            endDt = `${todayStr}T${String(h + 1).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`;
+          } else if (item.deadline.includes('-')) {
+            startDt = `${item.deadline}T09:00:00`;
+            endDt = `${item.deadline}T10:00:00`;
+          }
+          if (startDt) {
+            const res = await otTeamup.post('/events', {
+              subcalendar_id: OT_SUBCAL,
+              title: `📌 ${item.title}${item.assignee ? ' → ' + item.assignee : ''}`,
+              start_dt: startDt, end_dt: endDt, all_day: false
+            });
+            calendarEventId = res.data?.event?.id || null;
+          }
+        } catch (e) { console.error('Calendar create error:', e.message); }
+      }
+
+      const task = addTask({
+        title: item.title,
+        assignee: item.assignee || '',
+        deadline: item.deadline || '',
+        calendarEventId,
+        date: (item.deadline && item.deadline.includes('-')) ? item.deadline : todayStr
+      });
+      createdTasks.push(task);
+    }
+
+    // 發送確認 + 按鈕
+    let text = parsed.reply || `📌 已建立 ${createdTasks.length} 個任務：\n\n`;
+    const buttons = [];
+    for (const t of createdTasks) {
+      const assignee = t.assignee ? ` → <b>${t.assignee}</b>` : '';
+      const deadline = t.deadline ? ` ⏰${t.deadline}` : '';
+      const cal = t.calendarEventId ? ' 📅' : '';
+      text += `⬜ ${t.title}${assignee}${deadline}${cal}\n`;
+      buttons.push([{
+        text: `✅ 完成: ${t.title.substring(0, 30)}`,
+        callback_data: `task_done_${t.id}`
+      }]);
+    }
+    await sendWithButtons(text, buttons);
+  }
+  // ── 員工完成回報 ──────────────────────────────────────
+  else if (action === 'complete_task') {
+    const keyword = parsed.keyword || '';
+    const task = findPendingTaskByKeyword(keyword);
+    if (task) {
+      markTaskDone(task.id, 'team');
+      await send(`✅ 已完成任務：<b>${task.title}</b>\n\n` + (parsed.reply || '好的，已標記完成！'));
+
+      // 檢查是否全部完成
+      const pending = getPendingTasks();
+      if (pending.length === 0) {
+        await send('🎉🎉🎉 所有任務都完成了！太棒了！');
+      } else {
+        await send(`📋 還剩 ${pending.length} 項待辦任務`);
+      }
+    } else {
+      // 找不到匹配的任務，列出所有待辦讓員工選
+      const pending = getPendingTasks();
+      if (pending.length === 0) {
+        await send('✅ 目前沒有待辦任務了！');
+      } else {
+        let text = `🤔 找不到「${keyword}」相關的任務。\n目前的待辦任務：\n\n`;
+        text += formatTaskList(pending);
+        const buttons = pending.map(t => [{
+          text: `✅ 完成: ${t.title.substring(0, 30)}`,
+          callback_data: `task_done_${t.id}`
+        }]);
+        await sendWithButtons(text, buttons);
+      }
+    }
+  }
   else if (action === 'reply') {
     await send(parsed.reply || '🤔');
   }
@@ -855,7 +1153,44 @@ app.post('/webhook', async (req, res) => {
   try {
     const update = req.body;
 
-    // 只處理文字訊息
+    // ── 處理 callback_query（員工點按鈕）──────────────
+    if (update.callback_query) {
+      const cb = update.callback_query;
+      const data = cb.data || '';
+      const userName = cb.from.first_name || cb.from.username || 'unknown';
+      const chatId = cb.message?.chat?.id;
+
+      if (data.startsWith('task_done_')) {
+        const taskId = data.replace('task_done_', '');
+        const task = markTaskDone(taskId, userName);
+        if (task) {
+          // 回覆 callback
+          await tg.post('/answerCallbackQuery', {
+            callback_query_id: cb.id,
+            text: `✅ ${userName} 完成了: ${task.title}`
+          });
+          // 在群裡通知
+          await send(`✅ <b>${userName}</b> 已完成任務：<b>${task.title}</b>`, chatId);
+
+          // 檢查是否所有今日任務都完成了
+          const todayTasks = getTasksByDate(task.date);
+          const allDone = todayTasks.every(t => t.status === 'done');
+          if (allDone && todayTasks.length > 0) {
+            await send(`🎉🎉🎉 太棒了！今天 ${todayTasks.length} 個任務全部完成！`, chatId);
+          }
+        } else {
+          await tg.post('/answerCallbackQuery', {
+            callback_query_id: cb.id,
+            text: '❌ 找不到這個任務（可能已經完成了）'
+          });
+        }
+      }
+
+      res.json({ ok: true });
+      return;
+    }
+
+    // ── 處理文字訊息 ─────────────────────────────────
     const message = update.message;
     if (!message || !message.text) {
       res.json({ ok: true });
@@ -868,10 +1203,18 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    console.log('📨 接收到訊息:', message.text);
+    const userId = String(message.from?.id || '');
+    const msgText = message.text.trim();
+
+    console.log('📨 接收到訊息:', msgText, `(from: ${userId})`);
+
+    // ── 收集所有人的訊息（用於備份/批次整理）────────────
+    const fromName = message.from?.first_name || message.from?.username || 'unknown';
+    addBossMessage(msgText, fromName);
+    console.log(`📝 已收集訊息 [${fromName}]: ${msgText.substring(0, 50)}...`);
 
     // 異步處理訊息（不阻塞 webhook 回覆）
-    handle(message.text).catch(err => {
+    handle(msgText).catch(err => {
       console.error('❌ 訊息處理錯誤:', err.message);
       send(`❌ 错误：${err.message.substring(0, 200)}`).catch(e => console.error('發送錯誤:', e.message));
     });
@@ -1019,9 +1362,20 @@ async function weeklySummary() {
   }
 }
 
-function scheduleReminders() {
-  const REMINDER_HOURS = [9, 10, 11]; // 早上 9, 10, 11 點
+// ── 發送待辦提醒到群裡 ──────────────────────────────────
+async function sendTaskReminder(label) {
+  const report = formatPendingReport();
+  if (!report || report.pending.length === 0) return;
 
+  const buttons = report.pending.map(t => [{
+    text: `✅ 完成: ${t.title.substring(0, 30)}`,
+    callback_data: `task_done_${t.id}`
+  }]);
+  await sendWithButtons(`⏰ <b>${label}</b>\n\n${report.text}`, buttons);
+  incrementRemindCount(report.pending.map(t => t.id));
+}
+
+function scheduleReminders() {
   setInterval(() => {
     const now = new Date();
     const klTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kuala_Lumpur' }));
@@ -1029,8 +1383,55 @@ function scheduleReminders() {
     const m = klTime.getMinutes();
     const day = klTime.getDay(); // 0=Sunday
 
-    if (REMINDER_HOURS.includes(h) && m === 0) {
-      dailyReminder().catch(e => console.error('Reminder error:', e.message));
+    // ── 9am — 早上開工提醒（行程 + 待辦）
+    if (h === 9 && m === 0) {
+      dailyReminder().catch(e => console.error('Morning reminder error:', e.message));
+      sendTaskReminder('早上提醒 — 今日待辦任務')
+        .catch(e => console.error('Morning task reminder error:', e.message));
+    }
+
+    // ── 2pm — 下午提醒待辦
+    if (h === 14 && m === 0) {
+      sendTaskReminder('下午提醒 — 未完成任務')
+        .catch(e => console.error('Afternoon task reminder error:', e.message));
+    }
+
+    // ── 6pm — 傍晚收工提醒 + 自動整理當天訊息
+    if (h === 18 && m === 0) {
+      // 整理今天未處理的訊息
+      const msgs = getBossMessages();
+      if (msgs.length > 0) {
+        summarizeBossMessages().catch(e => console.error('Auto task summary error:', e.message));
+      }
+
+      // 發送待辦提醒 + 每日完成總結
+      const todayStr = toDateStr(new Date());
+      const todayTasks = getTasksByDate(todayStr);
+      const todayDone = todayTasks.filter(t => t.status === 'done');
+
+      let summaryText = `📊 <b>傍晚任務總結</b>\n\n`;
+
+      if (todayDone.length > 0) {
+        summaryText += `✅ <b>今天完成（${todayDone.length} 項）：</b>\n`;
+        summaryText += todayDone.map(t => `  ✅ ${t.title}${t.completedBy ? ' — ' + t.completedBy : ''}`).join('\n');
+        summaryText += '\n\n';
+      }
+
+      const report = formatPendingReport();
+      if (report && report.pending.length > 0) {
+        summaryText += report.text;
+        summaryText += `\n\n⚠️ 未完成任務會累積到明天，直到完成為止！`;
+        const buttons = report.pending.map(t => [{
+          text: `✅ 完成: ${t.title.substring(0, 30)}`,
+          callback_data: `task_done_${t.id}`
+        }]);
+        sendWithButtons(summaryText, buttons)
+          .catch(e => console.error('Evening summary error:', e.message));
+        incrementRemindCount(report.pending.map(t => t.id));
+      } else if (todayDone.length > 0) {
+        summaryText += '🎉 今天所有任務都完成了！辛苦了！';
+        send(summaryText).catch(e => console.error('Evening summary error:', e.message));
+      }
     }
 
     // Weekly summary: Sunday 8pm Malaysia time
@@ -1065,7 +1466,7 @@ app.listen(PORT, async () => {
   await setupWebhook();
 
   // 發送啟動訊息
-  send('🤖 Bot 已上線（Webhook 模式）！直接用自然語言跟我說話就行～\n⏰ 每天 9am/10am/11am 自動提醒今天行程\n🔔 每個行程開始前1小時自動通知你\n📊 每週日晚8點發送每週總結\n⚡ 已改用 Webhook（更穩定，無 409 問題）\n\n新功能：👥客戶管道 | 📋SOP | 💰收入追踪 | 🎬內容管道').catch(() => {});
+  send('🤖 Bot 已上線！\n\n📌 <b>即時任務系統</b>：\n• 交代工作 → Bot 自動偵測建立任務\n• 沒說日期 = 今天的任務\n• 員工說「完成了」或點按鈕 → 標記完成\n• 未完成的任務會累積提醒\n• 每天 2pm 提醒 / 9pm 總結\n\n📅 行程 → Jeff\'s Timetable\n📋 任務 → Operating Team 日曆').catch(() => {});
 
   // 啟動定期提醒
   scheduleReminders();
