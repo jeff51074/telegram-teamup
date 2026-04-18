@@ -1425,6 +1425,20 @@ app.post('/webhook', async (req, res) => {
         }
       }
 
+      // 處理 TeamUp 任務完成
+      if (data.startsWith('ot_task_done_')) {
+        const eventId = data.replace('ot_task_done_', '');
+        try {
+          await tg.post('/answerCallbackQuery', {
+            callback_query_id: cb.id,
+            text: `✅ ${userName} 已完成！`
+          });
+          await send(`✅ <b>${userName}</b> 已完成任務！`, chatId);
+        } catch (e) {
+          console.error('OT task done error:', e.message);
+        }
+      }
+
       res.json({ ok: true });
       return;
     }
@@ -1551,53 +1565,37 @@ async function dailyItemsReminder(label, emoji) {
       .filter(e => e.start_dt)
       .sort((a, b) => new Date(a.start_dt) - new Date(b.start_dt));
 
-    // 從 Operating Team Calendar 取得團隊行程
-    const otEvents = await getOTEvents(todayStr, todayStr);
-    const otSorted = otEvents
+    // 從 Operating Team Calendar 取得所有待辦任務
+    const allOTEvents = await getOTEvents('2020-01-01', '2099-12-31');
+    const otTasks = allOTEvents
       .filter(e => e.start_dt)
       .sort((a, b) => new Date(a.start_dt) - new Date(b.start_dt));
 
-    // 從任務系統取得待辦任務
-    const allPending = getPendingTasks();
-    const todayAndFuture = allPending.filter(t => !t.date || t.date >= todayStr);
-
     let message = `${emoji} <b>${label}</b>\n\n`;
-    const totalEvents = jeffSorted.length + otSorted.length;
 
-    // 顯示日曆行程
-    if (totalEvents > 0) {
-      if (jeffSorted.length > 0) {
-        message += `🗓 <b>Jeff 行程（${jeffSorted.length} 項）：</b>\n`;
-        message += jeffSorted.map(e => `  ${formatEvent(e)}`).join('\n');
-      }
-
-      if (otSorted.length > 0) {
-        if (jeffSorted.length > 0) message += '\n\n';
-        message += `📅 <b>團隊行程（${otSorted.length} 項）：</b>\n`;
-        message += otSorted.map(e => `  ${formatEvent(e)}`).join('\n');
-      }
-    } else {
-      message += `📋 今天沒有日曆行程\n`;
+    // 顯示 Jeff 個人行程
+    if (jeffSorted.length > 0) {
+      message += `🗓 <b>Jeff 行程（${jeffSorted.length} 項）：</b>\n`;
+      message += jeffSorted.map(e => `  ${formatEvent(e)}`).join('\n');
     }
 
-    // 顯示待辦任務（帶打勾按鈕）
-    if (todayAndFuture.length > 0) {
-      if (totalEvents > 0) message += '\n\n';
-      message += `📋 <b>待辦任務（${todayAndFuture.length} 項）：</b>\n`;
-      message += todayAndFuture.map(t => {
-        const overdue = t.remindCount > 0 ? ` ⚠️ 已提醒${t.remindCount}次` : '';
-        return `  🔸 ${t.title}${t.assignee ? ' → ' + t.assignee : ''}${overdue}`;
+    // 顯示所有 Operating Team 任務（帶打勾按鈕）
+    if (otTasks.length > 0) {
+      if (jeffSorted.length > 0) message += '\n\n';
+      message += `📋 <b>待辦任務（${otTasks.length} 項）：</b>\n`;
+      message += otTasks.map((e, i) => {
+        const dateStr = e.start_dt ? ` (${e.start_dt.substring(0, 10)})` : '';
+        return `  ${i + 1}. ${e.title}${dateStr}`;
       }).join('\n');
 
-      const buttons = todayAndFuture.map(t => [{
-        text: `✅ 完成: ${t.title.substring(0, 30)}`,
-        callback_data: `task_done_${t.id}`
+      const buttons = otTasks.map(e => [{
+        text: `✅ 完成: ${e.title.substring(0, 25)}`,
+        callback_data: `ot_task_done_${e.id}`
       }]);
       await sendWithButtons(message, buttons);
-      incrementRemindCount(todayAndFuture.map(t => t.id));
     } else {
-      if (totalEvents === 0) {
-        message += `\n\n輕鬆一天！`;
+      if (jeffSorted.length === 0) {
+        message += `📋 暫無任務 ✨\n\n輕鬆一天！`;
       }
       await send(message);
     }
@@ -1620,7 +1618,8 @@ async function dailyEndSummary() {
 
     // 今日行程總結
     const todayJeffEvents = await getEvents(todayStr, todayStr);
-    const todayOTEvents = await getOTEvents(todayStr, todayStr);
+    const allOTEvents = await getOTEvents('2020-01-01', '2099-12-31');
+    const todayOTEvents = allOTEvents.filter(e => e.start_dt && e.start_dt.substring(0, 10) === todayStr);
     const todayTotal = todayJeffEvents.length + todayOTEvents.length;
 
     if (todayTotal > 0) {
@@ -1638,7 +1637,7 @@ async function dailyEndSummary() {
 
     // 明日預覽
     const tomorrowJeffEvents = await getEvents(tomorrowStr, tomorrowStr);
-    const tomorrowOTEvents = await getOTEvents(tomorrowStr, tomorrowStr);
+    const tomorrowOTEvents = allOTEvents.filter(e => e.start_dt && e.start_dt.substring(0, 10) === tomorrowStr);
     const sortedTomorrowJeff = tomorrowJeffEvents
       .filter(e => e.start_dt)
       .sort((a, b) => new Date(a.start_dt) - new Date(b.start_dt));
@@ -1656,8 +1655,8 @@ async function dailyEndSummary() {
 
     if (sortedTomorrowOT.length > 0) {
       if (sortedTomorrowJeff.length > 0) message += '\n\n';
-      message += `📅 <b>團隊行程：</b>\n`;
-      message += sortedTomorrowOT.map(e => `  ${formatEvent(e)}`).join('\n');
+      message += `📋 <b>待辦任務（${sortedTomorrowOT.length}）：</b>\n`;
+      message += sortedTomorrowOT.map((e, i) => `  ${i + 1}. ${e.title}`).join('\n');
     }
 
     if (sortedTomorrowJeff.length === 0 && sortedTomorrowOT.length === 0) {
