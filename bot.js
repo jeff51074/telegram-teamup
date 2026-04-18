@@ -1540,115 +1540,112 @@ async function sendTomorrowPreview() {
   await send(msg, BOSS_USER_ID);
 }
 
-// ── 當日事項提醒（只發今日及未來任務到工作群）──────────────────
+// ── 當日事項提醒（從 TeamUp Calendar 讀取）──────────────────
 async function dailyItemsReminder(label, emoji) {
   const todayStr = toDateStr(new Date());
-  const allPending = getPendingTasks();
-  // 只顯示今天及之後的任務（不顯示過期舊任務）
-  const todayAndFuture = allPending.filter(t => !t.date || t.date >= todayStr);
 
-  let message = `${emoji} <b>${label}</b>\n\n`;
+  try {
+    // 從 TeamUp Calendar 取得今日行程
+    const jeffEvents = await getEvents(todayStr, todayStr);
+    const jeffSorted = jeffEvents
+      .filter(e => e.start_dt)
+      .sort((a, b) => new Date(a.start_dt) - new Date(b.start_dt));
 
-  if (todayAndFuture.length > 0) {
-    message += `📋 <b>待辦任務（${todayAndFuture.length} 項）：</b>\n`;
-    message += todayAndFuture.map(t => {
-      const overdue = t.remindCount > 0 ? ` ⚠️ 已提醒${t.remindCount}次` : '';
-      return `  🔸 ${t.title}${t.assignee ? ' → ' + t.assignee : ''}${overdue}`;
-    }).join('\n');
+    // 從 Operating Team Calendar 取得團隊行程
+    const otEvents = await getOTEvents(todayStr, todayStr);
+    const otSorted = otEvents
+      .filter(e => e.start_dt)
+      .sort((a, b) => new Date(a.start_dt) - new Date(b.start_dt));
 
-    const buttons = todayAndFuture.map(t => [{
-      text: `✅ 完成: ${t.title.substring(0, 30)}`,
-      callback_data: `task_done_${t.id}`
-    }]);
-    await sendWithButtons(message, buttons);
-    incrementRemindCount(todayAndFuture.map(t => t.id));
-  } else {
-    message += `📋 沒有待辦任務 ✅\n\n今天輕鬆！`;
-    await send(message);
+    let message = `${emoji} <b>${label}</b>\n\n`;
+
+    const totalEvents = jeffSorted.length + otSorted.length;
+
+    if (totalEvents > 0) {
+      if (jeffSorted.length > 0) {
+        message += `🗓 <b>Jeff 行程（${jeffSorted.length} 項）：</b>\n`;
+        message += jeffSorted.map(e => `  ${formatEvent(e)}`).join('\n');
+      }
+
+      if (otSorted.length > 0) {
+        if (jeffSorted.length > 0) message += '\n\n';
+        message += `📅 <b>團隊行程（${otSorted.length} 項）：</b>\n`;
+        message += otSorted.map(e => `  ${formatEvent(e)}`).join('\n');
+      }
+
+      await send(message);
+    } else {
+      message += `📋 今天沒有行程安排 ✅\n\n輕鬆一天！`;
+      await send(message);
+    }
+  } catch (e) {
+    console.error('Daily reminder error:', e.message);
+    await send(`❌ 無法取得行程：${e.message}`);
   }
 }
 
-// ── 6pm 每日總結（完成事項 + 明日預覽）──────────────────
+// ── 6pm 每日總結（明日預覽）──────────────────
 async function dailyEndSummary() {
-  const now = new Date();
-  const todayStr = toDateStr(now);
-  const tomorrow = new Date(now);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const tomorrowStr = toDateStr(tomorrow);
+  try {
+    const now = new Date();
+    const todayStr = toDateStr(now);
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = toDateStr(tomorrow);
 
-  let message = `📊 <b>今日收工總結</b>\n\n`;
+    let message = `📊 <b>今日收工總結</b>\n\n`;
 
-  // 今日完成的任務
-  const todayTasks = getTasksByDate(todayStr);
-  const todayDone = todayTasks.filter(t => t.status === 'done');
+    // 今日行程總結
+    const todayJeffEvents = await getEvents(todayStr, todayStr);
+    const todayOTEvents = await getOTEvents(todayStr, todayStr);
+    const todayTotal = todayJeffEvents.length + todayOTEvents.length;
 
-  if (todayDone.length > 0) {
-    message += `✅ <b>今日完成（${todayDone.length} 項）：</b>\n`;
-    message += todayDone.map(t => `  ✅ ${t.title}${t.completedBy ? ' — ' + t.completedBy : ''}`).join('\n');
-    message += '\n\n';
-  } else {
-    message += `✅ 今天沒有完成的任務\n\n`;
-  }
+    if (todayTotal > 0) {
+      message += `✅ <b>今日完成行程：${todayTotal} 項</b>\n`;
+      if (todayJeffEvents.length > 0) {
+        message += `  🗓 Jeff: ${todayJeffEvents.length} 項\n`;
+      }
+      if (todayOTEvents.length > 0) {
+        message += `  📅 團隊: ${todayOTEvents.length} 項\n`;
+      }
+      message += '\n';
+    } else {
+      message += `✅ 今天行程已完成\n\n`;
+    }
 
-  // 未完成的任務（只顯示今天及之後）
-  const allPending6pm = getPendingTasks();
-  const pending6pm = allPending6pm.filter(t => !t.date || t.date >= todayStr);
-  if (pending6pm.length > 0) {
-    message += `⚠️ <b>未完成任務（${pending6pm.length} 項）：</b>\n`;
-    message += pending6pm.map(t => `  🔸 ${t.title}${t.assignee ? ' → ' + t.assignee : ''}`).join('\n');
-    message += `\n⚠️ 未完成任務會累積到明天！\n\n`;
-  }
+    // 明日預覽
+    const tomorrowJeffEvents = await getEvents(tomorrowStr, tomorrowStr);
+    const tomorrowOTEvents = await getOTEvents(tomorrowStr, tomorrowStr);
+    const sortedTomorrowJeff = tomorrowJeffEvents
+      .filter(e => e.start_dt)
+      .sort((a, b) => new Date(a.start_dt) - new Date(b.start_dt));
+    const sortedTomorrowOT = tomorrowOTEvents
+      .filter(e => e.start_dt)
+      .sort((a, b) => new Date(a.start_dt) - new Date(b.start_dt));
 
-  // 明日 Jeff 個人行程
-  const tomorrowJeffEvents = await getEvents(tomorrowStr, tomorrowStr);
-  const sortedTomorrowJeff = tomorrowJeffEvents
-    .filter(e => e.start_dt)
-    .sort((a, b) => new Date(a.start_dt) - new Date(b.start_dt));
+    const tomorrowLabel = tomorrow.toLocaleDateString('zh-TW', { timeZone: 'Asia/Kuala_Lumpur', month: 'long', day: 'numeric', weekday: 'long' });
+    message += `🌙 <b>明日預覽</b>（${tomorrowLabel}）\n\n`;
 
-  // 明日 Operating Team 行程
-  const tomorrowOTEvents = await getOTEvents(tomorrowStr, tomorrowStr);
-  const sortedTomorrowOT = tomorrowOTEvents
-    .filter(e => e.start_dt)
-    .sort((a, b) => new Date(a.start_dt) - new Date(b.start_dt));
+    if (sortedTomorrowJeff.length > 0) {
+      message += `🗓 <b>Jeff 行程：</b>\n`;
+      message += sortedTomorrowJeff.map(e => `  ${formatEvent(e)}`).join('\n');
+    }
 
-  // 明日待辦任務（task system）
-  const tomorrowTasks = getTasksByDate(tomorrowStr).filter(t => t.status !== 'done');
+    if (sortedTomorrowOT.length > 0) {
+      if (sortedTomorrowJeff.length > 0) message += '\n\n';
+      message += `📅 <b>團隊行程：</b>\n`;
+      message += sortedTomorrowOT.map(e => `  ${formatEvent(e)}`).join('\n');
+    }
 
-  const tomorrowLabel = tomorrow.toLocaleDateString('zh-TW', { timeZone: 'Asia/Kuala_Lumpur', month: 'long', day: 'numeric', weekday: 'long' });
+    if (sortedTomorrowJeff.length === 0 && sortedTomorrowOT.length === 0) {
+      message += `  明天暫無安排，輕鬆一天 😌`;
+    }
 
-  message += `🌙 <b>明日預覽</b>（${tomorrowLabel}）\n`;
-
-  if (sortedTomorrowJeff.length > 0) {
-    message += `\n🗓 <b>Jeff 行程：</b>\n`;
-    message += sortedTomorrowJeff.map(e => `  ${formatEvent(e)}`).join('\n');
-  }
-
-  if (sortedTomorrowOT.length > 0) {
-    message += `\n\n📅 <b>團隊行程：</b>\n`;
-    message += sortedTomorrowOT.map(e => `  ${formatEvent(e)}`).join('\n');
-  }
-
-  if (tomorrowTasks.length > 0) {
-    message += `\n\n📋 <b>待辦任務：</b>\n`;
-    message += tomorrowTasks.map(t => `  🔸 ${t.title}${t.assignee ? ' → ' + t.assignee : ''}`).join('\n');
-  }
-
-  if (sortedTomorrowJeff.length === 0 && sortedTomorrowOT.length === 0 && tomorrowTasks.length === 0) {
-    message += `  明天暫無安排，輕鬆一天 😌`;
-  }
-
-  message += '\n\n辛苦了，明天繼續加油 💪';
-
-  // 如果有未完成任務，加按鈕
-  if (pending6pm.length > 0) {
-    const buttons = pending6pm.map(t => [{
-      text: `✅ 完成: ${t.title.substring(0, 30)}`,
-      callback_data: `task_done_${t.id}`
-    }]);
-    await sendWithButtons(message, buttons);
-    incrementRemindCount(pending6pm.map(t => t.id));
-  } else {
+    message += '\n\n辛苦了，明天繼續加油 💪';
     await send(message);
+  } catch (e) {
+    console.error('Daily summary error:', e.message);
+    await send(`❌ 無法取得行程總結：${e.message}`);
   }
 }
 
