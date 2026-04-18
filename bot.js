@@ -1557,10 +1557,14 @@ async function dailyItemsReminder(label, emoji) {
       .filter(e => e.start_dt)
       .sort((a, b) => new Date(a.start_dt) - new Date(b.start_dt));
 
-    let message = `${emoji} <b>${label}</b>\n\n`;
+    // 從任務系統取得待辦任務
+    const allPending = getPendingTasks();
+    const todayAndFuture = allPending.filter(t => !t.date || t.date >= todayStr);
 
+    let message = `${emoji} <b>${label}</b>\n\n`;
     const totalEvents = jeffSorted.length + otSorted.length;
 
+    // 顯示日曆行程
     if (totalEvents > 0) {
       if (jeffSorted.length > 0) {
         message += `🗓 <b>Jeff 行程（${jeffSorted.length} 項）：</b>\n`;
@@ -1572,10 +1576,29 @@ async function dailyItemsReminder(label, emoji) {
         message += `📅 <b>團隊行程（${otSorted.length} 項）：</b>\n`;
         message += otSorted.map(e => `  ${formatEvent(e)}`).join('\n');
       }
-
-      await send(message);
     } else {
-      message += `📋 今天沒有行程安排 ✅\n\n輕鬆一天！`;
+      message += `📋 今天沒有日曆行程\n`;
+    }
+
+    // 顯示待辦任務（帶打勾按鈕）
+    if (todayAndFuture.length > 0) {
+      if (totalEvents > 0) message += '\n\n';
+      message += `📋 <b>待辦任務（${todayAndFuture.length} 項）：</b>\n`;
+      message += todayAndFuture.map(t => {
+        const overdue = t.remindCount > 0 ? ` ⚠️ 已提醒${t.remindCount}次` : '';
+        return `  🔸 ${t.title}${t.assignee ? ' → ' + t.assignee : ''}${overdue}`;
+      }).join('\n');
+
+      const buttons = todayAndFuture.map(t => [{
+        text: `✅ 完成: ${t.title.substring(0, 30)}`,
+        callback_data: `task_done_${t.id}`
+      }]);
+      await sendWithButtons(message, buttons);
+      incrementRemindCount(todayAndFuture.map(t => t.id));
+    } else {
+      if (totalEvents === 0) {
+        message += `\n\n輕鬆一天！`;
+      }
       await send(message);
     }
   } catch (e) {
