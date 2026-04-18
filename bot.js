@@ -20,10 +20,11 @@ const BOT_DIR = __dirname;
 // ── Boss User ID（只有 Boss 的訊息會被收集為任務）────────
 const BOSS_USER_ID = process.env.BOSS_USER_ID || '1168091068'; // 你的 Telegram user ID
 
-// ── Data file paths ─────────────────────────────────────
-const CLIENTS_FILE = path.join(BOT_DIR, 'clients.json');
-const REVENUE_FILE = path.join(BOT_DIR, 'revenue.json');
-const CONTENT_FILE = path.join(BOT_DIR, 'content.json');
+// ── Data file paths（Railway Volume 掛載在 /data，本地用 BOT_DIR）─────────
+const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || BOT_DIR;
+const CLIENTS_FILE = path.join(DATA_DIR, 'clients.json');
+const REVENUE_FILE = path.join(DATA_DIR, 'revenue.json');
+const CONTENT_FILE = path.join(DATA_DIR, 'content.json');
 
 // ── JSON file helpers ───────────────────────────────────
 function readJsonFile(filePath, defaultValue) {

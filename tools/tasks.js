@@ -5,8 +5,9 @@
 const fs = require('fs');
 const path = require('path');
 
-const TASKS_FILE = path.join(__dirname, '..', 'tasks.json');
-const BOSS_MSGS_FILE = path.join(__dirname, '..', 'boss_messages.json');
+const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '..');
+const TASKS_FILE = path.join(DATA_DIR, 'tasks.json');
+const BOSS_MSGS_FILE = path.join(DATA_DIR, 'boss_messages.json');
 
 // ── JSON helpers ──────────────────────────────────────────
 function readJson(file, fallback) {
