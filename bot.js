@@ -14,6 +14,7 @@ const {
 } = require('./tools/tasks');
 
 const CLAUDE = process.env.CLAUDE_PATH || '/Users/wynn/.nvm/versions/node/v24.14.1/bin/claude';
+const ON_RAILWAY = !!process.env.RAILWAY_ENVIRONMENT;
 const WORK_DIR = process.env.WORK_DIR || path.resolve(__dirname, '..');
 const BOT_DIR = __dirname;
 
@@ -963,6 +964,10 @@ async function executeAction(actionJson, replyTo) {
     }
   }
   else if (action === 'claude_code') {
+    if (ON_RAILWAY) {
+      await reply('⚙️ Claude Code 功能需在本地伺服器執行，Railway 環境不支持。');
+      return;
+    }
     await reply(parsed.reply || '⚙️ Claude Code 执行中...');
     execFile(
       CLAUDE,
@@ -2017,7 +2022,7 @@ if (USE_POLLING) {
   app.listen(PORT, async () => {
     console.log(`✅ Webhook 服務已啟動在 http://0.0.0.0:${PORT}`);
     await setupWebhook();
-    send('🤖 Jeff PA Bot 已上線！（Webhook 模式）\n\n📌 <b>即時任務系統</b>：\n• 交代工作 → Bot 自動偵測建立任務\n• 員工說「完成了」或點按鈕 → 標記完成\n• 未完成的任務會累積提醒').catch(() => {});
     scheduleReminders();
+    console.log('✅ Bot 已上線（Webhook 模式）');
   });
 }
