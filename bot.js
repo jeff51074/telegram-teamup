@@ -378,18 +378,22 @@ function formatRevenueReport(entries, periodLabel) {
 }
 
 // ── Send message ─────────────────────────────────────────
-async function send(text, chatId) {
-  await tg.post('/sendMessage', { chat_id: chatId || CHAT_ID, text, parse_mode: 'HTML' });
+async function send(text, chatId, threadId) {
+  const payload = { chat_id: chatId || CHAT_ID, text, parse_mode: 'HTML' };
+  if (threadId) payload.message_thread_id = threadId; // 论坛主题支持
+  await tg.post('/sendMessage', payload);
 }
 
 // 發送帶 inline 按鈕的訊息
-async function sendWithButtons(text, buttons, chatId) {
-  await tg.post('/sendMessage', {
+async function sendWithButtons(text, buttons, chatId, threadId) {
+  const payload = {
     chat_id: chatId || CHAT_ID,
     text,
     parse_mode: 'HTML',
     reply_markup: JSON.stringify({ inline_keyboard: buttons })
-  });
+  };
+  if (threadId) payload.message_thread_id = threadId; // 论坛主题支持
+  await tg.post('/sendMessage', payload);
 }
 
 // ── AI 任務整理：把 Boss 訊息整理成結構化任務 ─────────────
@@ -726,10 +730,10 @@ steps 里每个对象的 do 值：
 }
 
 // ── Execute action from Claude's response ────────────────
-async function executeAction(actionJson, replyTo) {
-  // 包裝 send，自動帶入 replyTo
-  const reply = (text) => send(text, replyTo);
-  const replyWithButtons = (text, buttons) => sendWithButtons(text, buttons, replyTo);
+async function executeAction(actionJson, replyTo, threadId = undefined) {
+  // 包裝 send，自動帶入 replyTo 和 threadId
+  const reply = (text) => send(text, replyTo, threadId);
+  const replyWithButtons = (text, buttons) => sendWithButtons(text, buttons, replyTo, threadId);
 
   let parsed;
   try {
@@ -1316,7 +1320,7 @@ function detectServerIntent(msg) {
 }
 
 // ── Command Handler ──────────────────────────────────────
-async function handle(text, replyTo, jeffMode = false, teamMode = false) {
+async function handle(text, replyTo, jeffMode = false, teamMode = false, threadId = undefined) {
   const msg = text.trim();
 
   // ── Server control: only for Boss private chat ─────────
@@ -1328,32 +1332,32 @@ async function handle(text, replyTo, jeffMode = false, teamMode = false) {
 
     if (nlIntent === 'status') {
       const out = await runCmd('source ~/.nvm/nvm.sh 2>/dev/null; pm2 list --no-color');
-      return send(`⚙️ <b>Bot 狀態</b>\n<pre>${out.substring(0, 3000)}</pre>`, replyTo);
+      return send(`⚙️ <b>Bot 狀態</b>\n<pre>${out.substring(0, 3000)}</pre>`, replyTo, threadId);
     }
 
     if (nlIntent === 'restart') {
-      await send('🔄 重啟中...', replyTo);
+      await send('🔄 重啟中...', replyTo, threadId);
       const out = await runCmd('source ~/.nvm/nvm.sh 2>/dev/null; pm2 restart all && pm2 save');
-      return send(`✅ <b>重啟完成</b>\n<pre>${out.substring(0, 1000)}</pre>`, replyTo);
+      return send(`✅ <b>重啟完成</b>\n<pre>${out.substring(0, 1000)}</pre>`, replyTo, threadId);
     }
 
     if (nlIntent === 'logs') {
       const linesMatch = msg.match(/(\d+)\s*(行|lines?)/i);
       const lines = linesMatch ? linesMatch[1] : '40';
       const out = await runCmd(`source ~/.nvm/nvm.sh 2>/dev/null; pm2 logs jeff-pa-bot --lines ${lines} --nostream --no-color 2>&1`);
-      return send(`📋 <b>最近 ${lines} 行 logs</b>\n<pre>${out.substring(0, 3500)}</pre>`, replyTo);
+      return send(`📋 <b>最近 ${lines} 行 logs</b>\n<pre>${out.substring(0, 3500)}</pre>`, replyTo, threadId);
     }
 
     if (nlIntent === 'update') {
-      await send('📦 拉取最新代碼並重啟...', replyTo);
+      await send('📦 拉取最新代碼並重啟...', replyTo, threadId);
       const botDir = path.resolve(__dirname);
       const out = await runCmd(`cd "${botDir}" && git pull 2>&1; source ~/.nvm/nvm.sh 2>/dev/null; pm2 restart jeff-pa-bot && pm2 save`);
-      return send(`✅ <b>更新完成</b>\n<pre>${out.substring(0, 2000)}</pre>`, replyTo);
+      return send(`✅ <b>更新完成</b>\n<pre>${out.substring(0, 2000)}</pre>`, replyTo, threadId);
     }
 
     if (nlIntent === 'disk') {
       const out = await runCmd('df -h ~ 2>&1');
-      return send(`💾 <b>磁碟空間</b>\n<pre>${out.substring(0, 1000)}</pre>`, replyTo);
+      return send(`💾 <b>磁碟空間</b>\n<pre>${out.substring(0, 1000)}</pre>`, replyTo, threadId);
     }
 
     if (nlIntent === 'help') {
@@ -1364,18 +1368,19 @@ async function handle(text, replyTo, jeffMode = false, teamMode = false) {
         `• 「bot 狀態」— PM2 運行狀態\n` +
         `• 「更新代碼」— git pull + 重啟\n` +
         `• 「磁碟空間」— 查看空間`,
-        replyTo
+        replyTo,
+        threadId
       );
     }
   }
 
-  await send('💭 思考中...', replyTo);
+  await send('💭 思考中...', replyTo, threadId);
 
   // 用 Claude API 理解用户意图並返回 JSON action
   const answer = await askClaudeWithSearch(msg, jeffMode, teamMode);
 
   // 執行 Claude 返回的 action（新增日程、查询行程等）
-  await executeAction(answer, replyTo);
+  await executeAction(answer, replyTo, threadId);
 }
 
 // ── Webhook Server (替代 Polling) ──────────────────────
@@ -1899,10 +1904,27 @@ async function startPolling() {
         const userId = String(message.from?.id || '');
         const isGroup = ALLOWED_CHATS.includes(chatId);
         const isBossPrivate = userId === BOSS_USER_ID && message.chat.type === 'private';
+        const threadId = message.message_thread_id || undefined; // 支持论坛主题
 
         // 只接受允許的群組 或 Boss 私聊
         if (!isGroup && !isBossPrivate) {
-          if (message.chat.type !== 'private') {
+          if (message.chat.type === 'private') {
+            // 私聊被拒绝，给用户详细的帮助信息
+            console.log(`🔒 拒绝未授权私聊: ${message.from?.first_name || 'unknown'} (${userId})`);
+            const helpMsg =
+              `👋 嗨 ${message.from?.first_name || '你'}！\n\n` +
+              `🔒 <b>私聊功能</b>\n` +
+              `目前 Bot 的私聊功能只限 Boss 使用（服务器控制）。\n\n` +
+              `💬 <b>在群组中使用 Bot</b>\n` +
+              `请在工作群组中直接说话，支持自然语言：\n\n` +
+              `📋 <b>群组命令示例：</b>\n` +
+              `• "新增任务：整理文档，明天完成"\n` +
+              `• "查看今天行程"\n` +
+              `• "待办" —— 显示所有未完成任务\n` +
+              `• "拍摄行程" —— 团队行程\n\n` +
+              `🎯 你可以在工作群组中发送任何相关请求！`;
+            await send(helpMsg, chatId, threadId).catch(() => {});
+          } else {
             console.log(`⏭️ 跳過群組: ${message.chat.title || 'unknown'} | ID: ${chatId}`);
           }
           continue;
@@ -1927,8 +1949,8 @@ async function startPolling() {
         const modeLabel = isJeffMsg ? '[Jeff行程]' : isTeamMsg ? '[拍攝行程]' : isSummaryMsg ? '[待辦總結]' : isQueryMsg ? '[查詢]' : isDeleteMsg ? '[刪除]' : '[任務]';
         console.log(`📨 接收到訊息: ${msgText} (from: ${userId}, chat: ${chatId}, ${isGroup ? '群組' : '私聊'} ${modeLabel})`);
 
-        // 回覆到來源聊天（私聊回私聯，群組回群組）
-        const replyTo = isGroup ? chatId : chatId;
+        // 回覆到來源聊天（私聊回私聯，群組回群組），並保留論壇主題
+        const replyTo = chatId;
 
         // 待辦/总结 → 直接顯示未完成任務
         if (isSummaryMsg) {
@@ -1979,21 +2001,21 @@ async function startPolling() {
                   text: `✅ 完成: ${t.title.substring(0, 30)}`,
                   callback_data: `task_done_${t.id}`
                 }]);
-                await sendWithButtons(msg, buttons, replyTo);
+                await sendWithButtons(msg, buttons, replyTo, threadId);
               } else {
-                await send(msg, replyTo);
+                await send(msg, replyTo, threadId);
               }
             } catch (e) {
               console.error('Summary error:', e.message);
-              await send(`❌ 查詢失敗：${e.message}`, replyTo);
+              await send(`❌ 查詢失敗：${e.message}`, replyTo, threadId);
             }
           })();
           continue;
         }
 
-        handle(msgText, replyTo, isJeffMsg, isTeamMsg).catch(err => {
+        handle(msgText, replyTo, isJeffMsg, isTeamMsg, threadId).catch(err => {
           console.error('❌ 訊息處理錯誤:', err.message);
-          send(`❌ 错误：${err.message.substring(0, 200)}`, replyTo).catch(() => {});
+          send(`❌ 错误：${err.message.substring(0, 200)}`, replyTo, threadId).catch(() => {});
         });
       }
     } catch (err) {
