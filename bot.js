@@ -28,7 +28,6 @@ const REVENUE_FILE = path.join(DATA_DIR, 'revenue.json');
 const CONTENT_FILE = path.join(DATA_DIR, 'content.json');
 
 // ── Volume 首次啟動：把 repo 內的 seed 搬進 Volume ──────────
-// 只在 Volume 是新的（tasks.json 不存在）時執行，避免覆蓋已有資料
 try {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   const tasksPath = path.join(DATA_DIR, 'tasks.json');
@@ -39,6 +38,103 @@ try {
   }
 } catch (e) {
   console.error('Seed migration error:', e.message);
+}
+
+// ── 團隊名冊（team.json）— 每次啟動都更新，但保留已經抓到的 Liqi ID
+const TEAM_FILE = path.join(DATA_DIR, 'team.json');
+const CONTACTS_FILE = path.join(DATA_DIR, 'contacts.json');
+const DEFAULT_TEAM = [
+  {
+    name: 'Jeff', alias: ['Jeff','Boss','J','jeff'], role: '老闆',
+    telegramId: '1168091068', telegramUsername: 'davidtao',
+    scope: ['戰略','業務開發','對外談判','內容方向'], isBoss: true
+  },
+  {
+    name: 'Joey', alias: ['Joey','Joey Tan','Joeyyiin','乔伊'], role: '運營經理',
+    telegramId: '1186425095', telegramUsername: 'Joeyyiin',
+    scope: ['運營','流量投放','boosting','帳號管理','貼文排程','page 管理','數據分析']
+  },
+  {
+    name: 'Liqi', alias: ['Liqi','力奇','liqi','李奇'], role: 'Admin',
+    telegramId: null, telegramUsername: null,
+    scope: ['行政','排程','合約','客戶跟進','資料整理','會議安排']
+  }
+];
+try {
+  let team = DEFAULT_TEAM;
+  if (fs.existsSync(TEAM_FILE)) {
+    const existing = JSON.parse(fs.readFileSync(TEAM_FILE, 'utf-8'));
+    // 保留已抓到的 telegramId/username（不要被 default 覆蓋）
+    team = DEFAULT_TEAM.map(d => {
+      const prev = existing.find(e => e.name === d.name);
+      return prev ? { ...d, telegramId: prev.telegramId || d.telegramId, telegramUsername: prev.telegramUsername || d.telegramUsername } : d;
+    });
+  }
+  fs.writeFileSync(TEAM_FILE, JSON.stringify(team, null, 2));
+  console.log(`👥 team.json loaded：${team.map(t => `${t.name}${t.telegramId ? '✓' : '❓'}`).join(', ')}`);
+} catch (e) {
+  console.error('team.json error:', e.message);
+}
+if (!fs.existsSync(CONTACTS_FILE)) {
+  fs.writeFileSync(CONTACTS_FILE, JSON.stringify({}, null, 2));
+}
+
+// ── 修正歷史任務：Chris → Joey（一次性，跑完不會再改動正常 Joey 任務）
+try {
+  const tasksPath = path.join(DATA_DIR, 'tasks.json');
+  if (fs.existsSync(tasksPath)) {
+    const tasks = JSON.parse(fs.readFileSync(tasksPath, 'utf-8'));
+    let changed = 0;
+    for (const t of tasks) {
+      if (t.assignee === 'Chris') { t.assignee = 'Joey'; changed++; }
+    }
+    if (changed > 0) {
+      fs.writeFileSync(tasksPath, JSON.stringify(tasks, null, 2));
+      console.log(`🔧 修正 ${changed} 項 Chris 任務 → Joey`);
+    }
+  }
+} catch (e) {
+  console.error('Chris→Joey migration error:', e.message);
+}
+
+// ── 自動捕獲聯絡人：每收到訊息就寫進 contacts.json + 補 team.json 缺失的 ID
+function captureContact(tgUser) {
+  try {
+    if (!tgUser || !tgUser.id) return;
+    const contacts = fs.existsSync(CONTACTS_FILE) ? JSON.parse(fs.readFileSync(CONTACTS_FILE, 'utf-8')) : {};
+    const key = String(tgUser.id);
+    const rec = {
+      id: tgUser.id,
+      username: tgUser.username || null,
+      first_name: tgUser.first_name || '',
+      last_name: tgUser.last_name || '',
+      last_seen: new Date().toISOString()
+    };
+    contacts[key] = rec;
+    fs.writeFileSync(CONTACTS_FILE, JSON.stringify(contacts, null, 2));
+
+    // 自動補 team.json：用 username 或 first_name 比對 alias
+    const team = JSON.parse(fs.readFileSync(TEAM_FILE, 'utf-8'));
+    const fullName = `${tgUser.first_name || ''} ${tgUser.last_name || ''}`.trim();
+    let updated = false;
+    for (const m of team) {
+      if (m.telegramId) continue; // 已有 ID 就跳過
+      const aliases = (m.alias || []).map(a => a.toLowerCase());
+      const matched =
+        (tgUser.username && aliases.includes(tgUser.username.toLowerCase())) ||
+        (tgUser.first_name && aliases.includes(tgUser.first_name.toLowerCase())) ||
+        (fullName && aliases.includes(fullName.toLowerCase()));
+      if (matched) {
+        m.telegramId = String(tgUser.id);
+        m.telegramUsername = tgUser.username || null;
+        console.log(`🎯 自動抓到 ${m.name} 的 Telegram ID：${tgUser.id} (@${tgUser.username || '?'})`);
+        updated = true;
+      }
+    }
+    if (updated) fs.writeFileSync(TEAM_FILE, JSON.stringify(team, null, 2));
+  } catch (e) {
+    console.error('captureContact error:', e.message);
+  }
 }
 
 // ── JSON file helpers ───────────────────────────────────
@@ -711,13 +807,21 @@ steps 里每个对象的 do 值：
 当消息包含任务/工作指令时，自动创建任务：
 {"action":"auto_tasks","tasks":[{"title":"任務標題","assignee":"負責人","deadline":"HH:mm或YYYY-MM-DD","has_time":true}],"reply":"回复确认"}
 
+⭐ 團隊成員（assignee 只能是下列名字，否則留空）：
+- Jeff（老闆）：戰略、業務開發、對外談判、內容方向
+- Joey（運營經理）：運營、流量投放、boosting、帳號管理、貼文排程、page 管理、數據分析
+- Liqi（Admin）：行政、排程、合約、客戶跟進、資料整理、會議安排
+⚠️ 公司沒有 Chris/Jackson/Kate 等人，不要自己發明 assignee！
+⚠️ 如果任務內容符合某人的職責範圍，可以自動指派；否則 assignee 留空。
+
 判断规则：
-- "記得去問信用卡" → tasks:[{title:"問信用卡"}]
-- "拆解影片" → tasks:[{title:"拆解影片"}]
+- "記得去問信用卡" → tasks:[{title:"問信用卡",assignee:"Liqi"}]（行政類）
+- "設定 page 管理" → tasks:[{title:"設定 page 管理",assignee:"Joey"}]（運營類）
 - "Joey 幫我剪那個 reel" → tasks:[{title:"剪 reel",assignee:"Joey"}]
+- "跟 XX 談合作" → tasks:[{title:"跟 XX 談合作",assignee:"Jeff"}]（對外談判）
 - "明天之前把報價單發出去" → tasks:[{title:"發報價單",deadline:"明天的日期"}]
 - 如果没说日期/时间 → 默认今天，has_time=false
-- 如果没说负责人 → assignee 留空
+- 如果完全無法判斷 → assignee 留空
 - 閒聊、問問題、查行程 等非任務內容 → 不要用此 action
 - 一条消息可能包含多个任务
 
@@ -1730,7 +1834,17 @@ async function dailyTeamBoard() {
     }
 
     // AI 建議團隊今日核心 3 件
+    // 載入團隊名冊
+    let teamInfo = '';
+    try {
+      const team = JSON.parse(fs.readFileSync(TEAM_FILE, 'utf-8'));
+      teamInfo = team.map(m => `- ${m.name}（${m.role}）：專責 ${m.scope.join('、')}`).join('\n');
+    } catch {}
+
     const prompt = `你是團隊助理。請從以下待辦任務中，選出「團隊今天最該完成的 3 件事」。這是要發到 Operating Team 群組的公開訊息，讓大家對齊重點。
+
+👥 團隊成員：
+${teamInfo || '（未載入）'}
 
 📅 今天：${todayStr}（${weekday}）
 
@@ -2222,6 +2336,9 @@ async function startPolling() {
         const userId = String(message.from?.id || '');
         const isGroup = ALLOWED_CHATS.includes(chatId);
         const isBossPrivate = userId === BOSS_USER_ID && message.chat.type === 'private';
+
+        // 自動捕獲聯絡人（所有訊息都記，包含群組）
+        if (message.from) captureContact(message.from);
 
         // 只接受允許的群組 或 Boss 私聊
         if (!isGroup && !isBossPrivate) {
