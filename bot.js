@@ -1540,28 +1540,51 @@ async function sendTomorrowPreview() {
   await send(msg, BOSS_USER_ID);
 }
 
-// ── 當日事項提醒（只發今日及未來任務到工作群）──────────────────
+// ── 當日事項提醒（顯示所有未完成任務：逾期 + 今日 + 未來）──────────────
 async function dailyItemsReminder(label, emoji) {
   const todayStr = toDateStr(new Date());
   const allPending = getPendingTasks();
-  // 只顯示今天及之後的任務（不顯示過期舊任務）
-  const todayAndFuture = allPending.filter(t => !t.date || t.date >= todayStr);
+  const overdue = allPending.filter(t => t.date && t.date < todayStr);
+  const todayTasks = allPending.filter(t => !t.date || t.date === todayStr);
+  const future = allPending.filter(t => t.date && t.date > todayStr);
+  const allToShow = [...overdue, ...todayTasks, ...future];
 
   let message = `${emoji} <b>${label}</b>\n\n`;
 
-  if (todayAndFuture.length > 0) {
-    message += `📋 <b>待辦任務（${todayAndFuture.length} 項）：</b>\n`;
-    message += todayAndFuture.map(t => {
-      const overdue = t.remindCount > 0 ? ` ⚠️ 已提醒${t.remindCount}次` : '';
-      return `  🔸 ${t.title}${t.assignee ? ' → ' + t.assignee : ''}${overdue}`;
-    }).join('\n');
+  if (allToShow.length > 0) {
+    message += `📋 <b>待辦任務（${allToShow.length} 項）：</b>\n`;
 
-    const buttons = todayAndFuture.map(t => [{
+    if (overdue.length > 0) {
+      message += `\n🔴 <b>逾期未完成（${overdue.length} 項）：</b>\n`;
+      message += overdue.map(t => {
+        const daysLate = Math.floor((new Date(todayStr) - new Date(t.date)) / 86400000);
+        const remind = t.remindCount > 0 ? ` ⚠️ 已提醒${t.remindCount}次` : '';
+        return `  🔴 ${t.title}${t.assignee ? ' → ' + t.assignee : ''} (逾期${daysLate}天)${remind}`;
+      }).join('\n') + '\n';
+    }
+
+    if (todayTasks.length > 0) {
+      message += `\n📌 <b>今日任務（${todayTasks.length} 項）：</b>\n`;
+      message += todayTasks.map(t => {
+        const remind = t.remindCount > 0 ? ` ⚠️ 已提醒${t.remindCount}次` : '';
+        return `  🔸 ${t.title}${t.assignee ? ' → ' + t.assignee : ''}${remind}`;
+      }).join('\n') + '\n';
+    }
+
+    if (future.length > 0) {
+      message += `\n🗓️ <b>未來任務（${future.length} 項）：</b>\n`;
+      message += future.map(t => {
+        const remind = t.remindCount > 0 ? ` ⚠️ 已提醒${t.remindCount}次` : '';
+        return `  🔹 ${t.title}${t.assignee ? ' → ' + t.assignee : ''} (${t.date})${remind}`;
+      }).join('\n');
+    }
+
+    const buttons = allToShow.map(t => [{
       text: `✅ 完成: ${t.title.substring(0, 30)}`,
       callback_data: `task_done_${t.id}`
     }]);
     await sendWithButtons(message, buttons);
-    incrementRemindCount(todayAndFuture.map(t => t.id));
+    incrementRemindCount(allToShow.map(t => t.id));
   } else {
     message += `📋 沒有待辦任務 ✅\n\n今天輕鬆！`;
     await send(message);
@@ -1590,12 +1613,29 @@ async function dailyEndSummary() {
     message += `✅ 今天沒有完成的任務\n\n`;
   }
 
-  // 未完成的任務（只顯示今天及之後）
+  // 未完成的任務（包含逾期，按逾期/今日/未來分組）
   const allPending6pm = getPendingTasks();
-  const pending6pm = allPending6pm.filter(t => !t.date || t.date >= todayStr);
+  const overdue6pm = allPending6pm.filter(t => t.date && t.date < todayStr);
+  const today6pm = allPending6pm.filter(t => !t.date || t.date === todayStr);
+  const future6pm = allPending6pm.filter(t => t.date && t.date > todayStr);
+  const pending6pm = [...overdue6pm, ...today6pm, ...future6pm];
   if (pending6pm.length > 0) {
     message += `⚠️ <b>未完成任務（${pending6pm.length} 項）：</b>\n`;
-    message += pending6pm.map(t => `  🔸 ${t.title}${t.assignee ? ' → ' + t.assignee : ''}`).join('\n');
+    if (overdue6pm.length > 0) {
+      message += `\n🔴 逾期（${overdue6pm.length} 項）：\n`;
+      message += overdue6pm.map(t => {
+        const daysLate = Math.floor((new Date(todayStr) - new Date(t.date)) / 86400000);
+        return `  🔴 ${t.title}${t.assignee ? ' → ' + t.assignee : ''} (逾期${daysLate}天)`;
+      }).join('\n') + '\n';
+    }
+    if (today6pm.length > 0) {
+      message += `\n📌 今日（${today6pm.length} 項）：\n`;
+      message += today6pm.map(t => `  🔸 ${t.title}${t.assignee ? ' → ' + t.assignee : ''}`).join('\n') + '\n';
+    }
+    if (future6pm.length > 0) {
+      message += `\n🗓️ 未來（${future6pm.length} 項）：\n`;
+      message += future6pm.map(t => `  🔹 ${t.title}${t.assignee ? ' → ' + t.assignee : ''} (${t.date})`).join('\n') + '\n';
+    }
     message += `\n⚠️ 未完成任務會累積到明天！\n\n`;
   }
 
