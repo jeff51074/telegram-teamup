@@ -679,10 +679,19 @@ function buildSystemPrompt(jeffMode = false, teamMode = false) {
   const timeStr = now.toLocaleTimeString('zh-TW', { timeZone: 'Asia/Kuala_Lumpur', hour: '2-digit', minute: '2-digit' });
 
   const calendarNote = jeffMode
-    ? `\n⭐ 重要：此消息以 "jeff" 開頭，代表要加入 Jeff 的個人行程日曆（不是 Operating Team 日曆）。新增行程時使用 create_event action（個人日曆），不要用 auto_tasks。`
+    ? `\n⭐⭐⭐ 此為 Jeff 個人模式（私聊 Boss 或訊息以 "jeff" 開頭）：
+- **預設行為：含日期/時間的訊息 → create_event 寫入 Jeff 個人行事曆**（不是 Operating Team，不是任務）
+- 例子：「22 號處理 3 個計劃書」→ create_event 全天行程在 4/22
+- 例子：「明天 10am 跟 XX 開會」→ create_event 個人行事曆 明天 10am
+- 例子：「下週五拍攝」→ create_event 個人行事曆
+- ❌ 絕對不要用 auto_tasks，除非訊息明確說「加任務 / 記個任務 / task」等字眼
+- ❌ 絕對不要把 Jeff 私聊的內容派給 Joey`
     : teamMode
     ? `\n⭐ 重要：此消息含「拍攝/拍摄」關鍵字，代表是拍攝行程安排。使用 create_event action 寫入 Operating Team 日曆，不要用 auto_tasks 任務系統。`
-    : '';
+    : `\n⭐ 此為 Operating Team 群組模式：
+- 工作指令、交辦 → auto_tasks（任務系統）
+- 一般 assignee 預設 Joey（他是經理會自行分配）
+- 只有戰略/業務開發/對外談判才 assignee=Jeff`;
 
   return `你是一个 Telegram 日历助手机器人。用户会用自然语言跟你说话，你需要理解他们的意图并返回 JSON 动作。${calendarNote}
 
@@ -806,8 +815,10 @@ steps 里每个对象的 do 值：
 {"action":"list_pending_tasks","reply":"待办任务"}
 - 用户说 "待办" / "还有什么没做" / "任务进度" → 列出未完成的任务
 
-21. ⭐ 即時任務偵測（非常重要！）：
-当消息包含任务/工作指令时，自动创建任务：
+21. ⭐ 即時任務偵測（⚠️ 僅限 Operating Team 群組模式）：
+⛔ Jeff 個人模式（私聊 Boss 或 "jeff" 開頭）→ 不要用 auto_tasks，改用 create_event
+✅ Operating Team 群組模式 → 才用 auto_tasks
+当消息包含任务/工作指令时（在團隊群組），自动创建任务：
 {"action":"auto_tasks","tasks":[{"title":"任務標題","assignee":"負責人","deadline":"HH:mm或YYYY-MM-DD","has_time":true}],"reply":"回复确认"}
 
 ⭐ 團隊成員（assignee 只能是 Jeff 或 Joey）：
@@ -2450,7 +2461,9 @@ async function startPolling() {
           continue;
         }
 
-        handle(msgText, replyTo, isJeffMsg, isTeamMsg).catch(err => {
+        // Boss 私聊預設 = Jeff 個人模式（訊息 → 個人行事曆，而非任務）
+        const effectiveJeffMode = isJeffMsg || isBossPrivate;
+        handle(msgText, replyTo, effectiveJeffMode, isTeamMsg).catch(err => {
           console.error('❌ 訊息處理錯誤:', err.message);
           send(`❌ 错误：${err.message.substring(0, 200)}`, replyTo).catch(() => {});
         });
