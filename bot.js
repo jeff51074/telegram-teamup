@@ -27,6 +27,20 @@ const CLIENTS_FILE = path.join(DATA_DIR, 'clients.json');
 const REVENUE_FILE = path.join(DATA_DIR, 'revenue.json');
 const CONTENT_FILE = path.join(DATA_DIR, 'content.json');
 
+// ── Volume 首次啟動：把 repo 內的 seed 搬進 Volume ──────────
+// 只在 Volume 是新的（tasks.json 不存在）時執行，避免覆蓋已有資料
+try {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  const tasksPath = path.join(DATA_DIR, 'tasks.json');
+  const seedPath = path.join(BOT_DIR, 'tasks.seed.json');
+  if (!fs.existsSync(tasksPath) && fs.existsSync(seedPath)) {
+    fs.copyFileSync(seedPath, tasksPath);
+    console.log(`🌱 Seeded tasks.json from ${seedPath} → ${tasksPath}`);
+  }
+} catch (e) {
+  console.error('Seed migration error:', e.message);
+}
+
 // ── JSON file helpers ───────────────────────────────────
 function readJsonFile(filePath, defaultValue) {
   try {
