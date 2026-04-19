@@ -1543,25 +1543,48 @@ async function sendTomorrowPreview() {
 // ── 當日事項提醒（只發今日及未來任務到工作群）──────────────────
 async function dailyItemsReminder(label, emoji) {
   const todayStr = toDateStr(new Date());
-  const allPending = getPendingTasks();
-  // 只顯示今天及之後的任務（不顯示過期舊任務）
-  const todayAndFuture = allPending.filter(t => !t.date || t.date >= todayStr);
+  const allPending = getPendingTasks(); // 顯示所有未完成任務（不管創建日期）
 
   let message = `${emoji} <b>${label}</b>\n\n`;
 
-  if (todayAndFuture.length > 0) {
-    message += `📋 <b>待辦任務（${todayAndFuture.length} 項）：</b>\n`;
-    message += todayAndFuture.map(t => {
-      const overdue = t.remindCount > 0 ? ` ⚠️ 已提醒${t.remindCount}次` : '';
-      return `  🔸 ${t.title}${t.assignee ? ' → ' + t.assignee : ''}${overdue}`;
-    }).join('\n');
+  if (allPending.length > 0) {
+    // 按日期分組：逾期 / 今天 / 未來
+    const overdue = allPending.filter(t => t.date && t.date < todayStr);
+    const todayTasks = allPending.filter(t => !t.date || t.date === todayStr);
+    const futureTasks = allPending.filter(t => t.date && t.date > todayStr);
 
-    const buttons = todayAndFuture.map(t => [{
+    message += `📋 <b>待辦任務（${allPending.length} 項）：</b>\n`;
+
+    if (overdue.length > 0) {
+      message += `\n🔴 <b>未完成（${overdue.length}）：</b>\n`;
+      message += overdue.map(t => {
+        const cnt = t.remindCount > 0 ? ` ⚠️ 已提醒${t.remindCount}次` : '';
+        return `  🔸 ${t.title}${t.assignee ? ' → ' + t.assignee : ''}${cnt}`;
+      }).join('\n');
+    }
+
+    if (todayTasks.length > 0) {
+      message += `\n📅 <b>今天（${todayTasks.length}）：</b>\n`;
+      message += todayTasks.map(t => {
+        const cnt = t.remindCount > 0 ? ` ⚠️ 已提醒${t.remindCount}次` : '';
+        return `  🔸 ${t.title}${t.assignee ? ' → ' + t.assignee : ''}${cnt}`;
+      }).join('\n');
+    }
+
+    if (futureTasks.length > 0) {
+      message += `\n🗓️ <b>未來（${futureTasks.length}）：</b>\n`;
+      message += futureTasks.map(t => {
+        const cnt = t.remindCount > 0 ? ` ⚠️ 已提醒${t.remindCount}次` : '';
+        return `  🔸 ${t.title}${t.assignee ? ' → ' + t.assignee : ''} (${t.date})${cnt}`;
+      }).join('\n');
+    }
+
+    const buttons = allPending.map(t => [{
       text: `✅ 完成: ${t.title.substring(0, 30)}`,
       callback_data: `task_done_${t.id}`
     }]);
     await sendWithButtons(message, buttons);
-    incrementRemindCount(todayAndFuture.map(t => t.id));
+    incrementRemindCount(allPending.map(t => t.id));
   } else {
     message += `📋 沒有待辦任務 ✅\n\n今天輕鬆！`;
     await send(message);
@@ -1590,12 +1613,11 @@ async function dailyEndSummary() {
     message += `✅ 今天沒有完成的任務\n\n`;
   }
 
-  // 未完成的任務（只顯示今天及之後）
+  // 未完成的任務（顯示所有未完成，不管日期）
   const allPending6pm = getPendingTasks();
-  const pending6pm = allPending6pm.filter(t => !t.date || t.date >= todayStr);
-  if (pending6pm.length > 0) {
-    message += `⚠️ <b>未完成任務（${pending6pm.length} 項）：</b>\n`;
-    message += pending6pm.map(t => `  🔸 ${t.title}${t.assignee ? ' → ' + t.assignee : ''}`).join('\n');
+  if (allPending6pm.length > 0) {
+    message += `⚠️ <b>未完成任務（${allPending6pm.length} 項）：</b>\n`;
+    message += allPending6pm.map(t => `  🔸 ${t.title}${t.assignee ? ' → ' + t.assignee : ''}`).join('\n');
     message += `\n⚠️ 未完成任務會累積到明天！\n\n`;
   }
 
