@@ -1579,17 +1579,12 @@ async function dailyItemsReminder(label, emoji) {
       }).join('\n');
     }
 
-    // 完成按鈕只給今日和未來任務（逾期任務只展示提醒）
-    const actionable = [...todayTasks, ...future];
-    const buttons = actionable.map(t => [{
+    // 完成按鈕覆蓋所有未完成任務（逾期 + 今日 + 未來）
+    const buttons = allToShow.map(t => [{
       text: `✅ 完成: ${t.title.substring(0, 30)}`,
       callback_data: `task_done_${t.id}`
     }]);
-    if (buttons.length > 0) {
-      await sendWithButtons(message, buttons);
-    } else {
-      await send(message);
-    }
+    await sendWithButtons(message, buttons);
     incrementRemindCount(allToShow.map(t => t.id));
   } else {
     message += `📋 沒有待辦任務 ✅\n\n今天輕鬆！`;
