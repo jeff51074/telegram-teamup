@@ -1540,6 +1540,154 @@ async function sendTomorrowPreview() {
   await send(msg, BOSS_USER_ID);
 }
 
+// ── 每日 Top 3 最重要任務（AI 智能排序，私聊發給 Boss）──────────────────
+async function dailyTop3(label = '☕ 今日最重要 3 件事', targetChatId = null) {
+  const sendTo = targetChatId || BOSS_USER_ID;
+  try {
+    const now = new Date();
+    const todayStr = toDateStr(now);
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = toDateStr(tomorrow);
+
+    // 收集資料
+    const allPending = getPendingTasks();
+    const todayJeffEvents = await getEvents(todayStr, todayStr);
+    const tomorrowJeffEvents = await getEvents(tomorrowStr, tomorrowStr);
+    const todayOTEvents = await getOTEvents(todayStr, todayStr);
+    const tomorrowOTEvents = await getOTEvents(tomorrowStr, tomorrowStr);
+
+    if (allPending.length === 0) {
+      await send(`${label}\n\n🎉 所有任務都完成了！享受空白的一天 😌`, sendTo);
+      return;
+    }
+
+    const weekday = now.toLocaleDateString('zh-TW', { timeZone: 'Asia/Kuala_Lumpur', weekday: 'long' });
+    const isWeekend = now.getDay() === 0 || now.getDay() === 6;
+
+    // 建 prompt 給 Claude
+    const prompt = `你是 Jeff 的智能助理。請幫他從下列 ${allPending.length} 項待辦任務中，挑出今天最重要的 3 件事，並給出理由和建議時段。
+
+📅 今天：${todayStr}（${weekday}）${isWeekend ? ' [週末]' : ''}
+
+━━━━━━━━━━━━━━━━━━━
+📋 所有未完成任務（${allPending.length} 項）：
+${allPending.map((t, i) => {
+  const dateInfo = t.date ? ` [日期:${t.date}]` : ' [無日期]';
+  const assignee = t.assignee ? ` [指派:${t.assignee}]` : ' [未指派]';
+  const remind = t.remindCount > 0 ? ` [已提醒${t.remindCount}次]` : '';
+  return `${i + 1}. ${t.title}${dateInfo}${assignee}${remind} (id: ${t.id})`;
+}).join('\n')}
+
+━━━━━━━━━━━━━━━━━━━
+📅 今天 Jeff 個人行程（${todayJeffEvents.length} 項）：
+${todayJeffEvents.length > 0 ? todayJeffEvents.map(e => `- ${e.start_dt || '全天'} ${e.title}`).join('\n') : '(空閒)'}
+
+📅 今天 Operating Team 行程（${todayOTEvents.length} 項）：
+${todayOTEvents.length > 0 ? todayOTEvents.map(e => `- ${e.start_dt || '全天'} ${e.title}`).join('\n') : '(無)'}
+
+📅 明天 Jeff 行程（${tomorrowJeffEvents.length} 項）：
+${tomorrowJeffEvents.length > 0 ? tomorrowJeffEvents.map(e => `- ${e.start_dt || '全天'} ${e.title}`).join('\n') : '(空閒)'}
+
+📅 明天 Operating Team 行程（${tomorrowOTEvents.length} 項）：
+${tomorrowOTEvents.length > 0 ? tomorrowOTEvents.map(e => `- ${e.start_dt || '全天'} ${e.title}`).join('\n') : '(無)'}
+
+━━━━━━━━━━━━━━━━━━━
+🎯 排序優先級規則：
+1. 🔴 最高：與今天或明天行程直接相關的準備工作（死線已到）
+2. ⚠️ 高：已提醒 3 次以上（代表拖了很久）
+3. 📄 中高：週末時，深度思考/寫文件類任務優先（環境安靜）
+4. 💬 中：需要與他人溝通的任務（工作日優先，週末延後）
+5. 🔧 低：內部系統優化類（永遠可以延後）
+
+━━━━━━━━━━━━━━━━━━━
+請嚴格以 JSON 格式回覆（不要任何額外文字）：
+{
+  "top3": [
+    {
+      "id": "任務id",
+      "rank": 1,
+      "reason": "簡短一句話為什麼第一重要（20字內）",
+      "suggested_time": "建議時段（如：早上9-11am）",
+      "prep_note": "準備什麼或怎麼切塊（30字內）"
+    }
+  ],
+  "quick_wins": ["適合 5-15 分鐘搞定的任務 id（最多 3 個）"],
+  "can_delay": ["今天不急可延後的任務 id（其餘全部）"],
+  "boss_insight": "一句給 Boss 的戰略建議（30字內，如：「你一個人扛 11 項，要開始下放」）"
+}`;
+
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 2000,
+      messages: [{ role: 'user', content: prompt }]
+    });
+
+    let answer = '';
+    for (const block of response.content) {
+      if (block.type === 'text') answer += block.text;
+    }
+
+    const jsonMatch = answer.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      await send(`${label}\n\n❌ AI 分析失敗，請稍後再試`, sendTo);
+      return;
+    }
+
+    const plan = JSON.parse(jsonMatch[0]);
+    const taskById = {};
+    allPending.forEach(t => { taskById[t.id] = t; });
+
+    // 組訊息
+    let msg = `${label}\n📅 ${todayStr}（${weekday}）\n\n`;
+
+    const medals = ['🥇', '🥈', '🥉'];
+    plan.top3.forEach((item, i) => {
+      const t = taskById[item.id];
+      if (!t) return;
+      msg += `${medals[i]} <b>${t.title}</b>`;
+      if (t.assignee) msg += ` → ${t.assignee}`;
+      msg += `\n   💡 ${item.reason}\n`;
+      if (item.suggested_time) msg += `   ⏰ ${item.suggested_time}\n`;
+      if (item.prep_note) msg += `   📝 ${item.prep_note}\n`;
+      msg += '\n';
+    });
+
+    if (plan.quick_wins && plan.quick_wins.length > 0) {
+      msg += `⚡ <b>Quick Wins（順手做）：</b>\n`;
+      plan.quick_wins.forEach(id => {
+        const t = taskById[id];
+        if (t) msg += `  • ${t.title}\n`;
+      });
+      msg += '\n';
+    }
+
+    const delayCount = (plan.can_delay || []).length;
+    if (delayCount > 0) {
+      msg += `🗓️ <b>今天可延後：${delayCount} 項</b>\n（打「總結」查看全部）\n\n`;
+    }
+
+    if (plan.boss_insight) {
+      msg += `━━━━━━━━━━━━━━━━\n🧠 <b>戰略洞察：</b>${plan.boss_insight}`;
+    }
+
+    // 加按鈕：標記 Top 3 完成
+    const buttons = plan.top3.map((item, i) => {
+      const t = taskById[item.id];
+      if (!t) return null;
+      return [{
+        text: `${medals[i]} 完成: ${t.title.substring(0, 25)}`,
+        callback_data: `task_done_${t.id}`
+      }];
+    }).filter(Boolean);
+
+    await sendWithButtons(msg, buttons, sendTo);
+  } catch (err) {
+    console.error('dailyTop3 error:', err.message);
+    await send(`❌ Top 3 生成失敗：${err.message}`, sendTo).catch(() => {});
+  }
+}
+
 // ── 當日事項提醒（只發今日及未來任務到工作群）──────────────────
 async function dailyItemsReminder(label, emoji) {
   const todayStr = toDateStr(new Date());
@@ -1801,6 +1949,12 @@ function scheduleReminders() {
       return true;
     };
 
+    // ── 7:30am — Top 3 最重要任務（私聊 Boss，AI 智能排序）
+    if (h === 7 && m === 30 && fireKey('top3')) {
+      dailyTop3('☕ 早安 Jeff！今天最重要 3 件事')
+        .catch(e => console.error('Top3 error:', e.message));
+    }
+
     // ── 9am — 今日行程（私人，發到私聊）
     if (h === 9 && m === 0 && fireKey('9am')) {
       dailyItemsReminder('早上開工 — 今日事項', '☀️')
@@ -1847,7 +2001,7 @@ function scheduleReminders() {
 
   eventPreReminder().catch(e => console.error('Pre-reminder error:', e.message));
 
-  console.log('⏰ 每日提醒：9/10/11am 行程 | 2pm 待辦 | 6pm 收工 | 8pm 明日預覽');
+  console.log('⏰ 每日提醒：7:30am Top3 | 9/10/11am 行程 | 2pm 待辦 | 6pm 收工 | 8pm 明日預覽');
   console.log('⏰ 事項提前1小時提醒已啟動');
   console.log('📊 每周总结：每周日 20:00');
 }
@@ -1944,13 +2098,21 @@ async function startPolling() {
         const isSummaryMsg = isGroup && /待[辦办]|總結|总结|未完成|[没沒]完成|還有[什啥]麼|还有[什啥]么|進度|进度|做完了[嗎吗]|剩[什啥][麼么]/.test(msgText);
         const isQueryMsg = isGroup && /查(任[務务]|進度|行程|今天|明天|本週|本周|这周|這週|这星期|這星期)|看行程|今天行程|明天行程|这周行程|這週行程|本周行程|本週行程|有[什啥][麼么]安排|行程表|schedule|Team行程|團隊行程|团队行程|团队日历|團隊日曆|operating team/i.test(msgText);
         const isDeleteMsg = isGroup && /刪除|删除|移除|remove|取消行程|cancel/.test(msgText);
-        if (isGroup && !isTaskMsg && !isTeamMsg && !isJeffMsg && !isSummaryMsg && !isQueryMsg && !isDeleteMsg) continue;
+        const isTop3Msg = /^\/?top3\b|三件事|今日重[點点]|最重要.*3|3.*最重要/i.test(msgText);
+        if (isGroup && !isTaskMsg && !isTeamMsg && !isJeffMsg && !isSummaryMsg && !isQueryMsg && !isDeleteMsg && !isTop3Msg) continue;
 
-        const modeLabel = isJeffMsg ? '[Jeff行程]' : isTeamMsg ? '[拍攝行程]' : isSummaryMsg ? '[待辦總結]' : isQueryMsg ? '[查詢]' : isDeleteMsg ? '[刪除]' : '[任務]';
+        const modeLabel = isTop3Msg ? '[Top3]' : isJeffMsg ? '[Jeff行程]' : isTeamMsg ? '[拍攝行程]' : isSummaryMsg ? '[待辦總結]' : isQueryMsg ? '[查詢]' : isDeleteMsg ? '[刪除]' : '[任務]';
         console.log(`📨 接收到訊息: ${msgText} (from: ${userId}, chat: ${chatId}, ${isGroup ? '群組' : '私聊'} ${modeLabel})`);
 
         // 回覆到來源聊天（私聊回私聯，群組回群組）
         const replyTo = isGroup ? chatId : chatId;
+
+        // /top3 → 手動觸發 Top 3 AI 排序
+        if (isTop3Msg) {
+          dailyTop3('🎯 手動觸發：今天最重要 3 件事', replyTo)
+            .catch(e => console.error('Top3 manual error:', e.message));
+          continue;
+        }
 
         // 待辦/总结 → 直接顯示未完成任務
         if (isSummaryMsg) {
